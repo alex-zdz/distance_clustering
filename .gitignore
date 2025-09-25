@@ -1,0 +1,14 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+old_code/
+literature/
+algorithm_dev_files/
+desktop.ini
+
+.html
+.png
+
+desktop.ini

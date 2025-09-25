@@ -1,0 +1,652 @@
+---
+title: "Algorithm Development Notebook"
+author: "Alexander Mozdzen"
+format: html
+execute:
+  echo: true
+  warning: false
+  message: false
+# header-includes:
+#   - \usepackage{algorithm}
+#   - \usepackage{algpseudocode}
+#   - \usepackage{amsmath}
+---
+
+### Setup, load and source
+
+```{r setup}
+# Load necessary libraries
+library(AntMAN)
+library(salso)
+library(tidyverse)
+source("../R/mixture_utils.R")
+
+```
+
+
+# Introduction
+
+This notebook documents the step-by-step development of the algorithm for the paper "Clustering by Minimum Distance Estimation" 
+Each section corresponds to a component of the R implementation, with toy examples to check correctness.
+
+Following Dahl et al. we design our algorithm similarly to their SALSO paper, albeit with some key differences.
+
+# Simulate data and run Bayesian mixture model
+We start by generating samples from a mixture model and use AntMAN to obtain posterior samples.
+
+```{r}
+# -----------------------------
+# Simulation parameters
+# -----------------------------
+N <- 100
+K <- 3
+alpha_0 <- 1
+
+simdata <- generate_mixture_data(
+  N,
+  K = K,
+  type = "Gaussian",
+  alpha = alpha_0,
+  means = NULL,
+  sds = NULL,
+  skews = NULL
+)
+
+y <- simdata$data
+cluster_true <- simdata$cluster_true
+weights_true <- simdata$weights_true
+
+# -----------------------------
+# Prior hyperparameters
+# -----------------------------
+alpha <- 1
+kappa_0 <- 1
+sig2_0 <- 1
+mu_0 <- 0
+nu_0 <- 1
+
+# -----------------------------
+# MCMC settings
+# -----------------------------
+n_iter <- 2e4
+burn_in <- n_iter / 4
+thin <- 10
+
+# -----------------------------
+# Define ANTMAN priors & parameters
+# -----------------------------
+mixture_uvn_params <- AntMAN::AM_mix_hyperparams_uninorm(
+  m0 = mu_0, k0 = kappa_0, nu0 = nu_0, sig02 = sig2_0
+)
+
+mcmc_params <- AntMAN::AM_mcmc_parameters(
+  niter = n_iter, burnin = burn_in, thin = thin, verbose = 1
+)
+
+components_prior <- AntMAN::AM_mix_components_prior_pois(Lambda = K)
+
+# weights_prior <- AntMAN::AM_mix_weights_prior_gamma(init = 2, a = 1, b = 1)
+
+# -----------------------------
+# Run MCMC and cluster
+# -----------------------------
+mix_post_draws <- AntMAN::AM_mcmc_fit(
+  y = y,
+  mix_kernel_hyperparams = mixture_uvn_params,
+  mix_components_prior = components_prior,
+  # mix_weight_prior = weights_prior,
+  mcmc_parameters = mcmc_params
+)
+
+eam <- AM_clustering(mix_post_draws)  # M*n matrix
+
+```
+
+
+```{r}
+
+# Compute Binder and VI estimates:
+AMcluster_binder = AM_salso(eam, "binder")
+AMcluster_VI = AM_salso(eam, "VI")
+
+```
+
+
+
+## Distance function
+
+The focal point of our paper is the usage of functions that measure the distance between probability distributions, specifically the empirical distribution and the posterior of a mixture model. Since the posterior of a mixture represents a clustering, we can optimize the clustering by minimizing the distance.
+
+The empirical distribution of a dataset $y$ is given by
+
+```{r}
+
+n = length(y)
+FN <- rep(0, n) 
+for (i in 1:n) { 
+   FN[i] <- sum(y <= y[i]) / n 
+} 
+
+plot(sort(y), sort(FN2), type = "s")
+
+# Or we could use R's inbuilt ecdf function
+
+test = ecdf(y)
+FN[2] == test(y[2])
+FN[2];test(y[2])
+
+```
+For the purpose of visualization we start with the Kolmogorov Smrinoff distance:
+
+$$
+D_{KS} &= \sup_x|F_n(x)-F(x)|
+$$
+
+where $F_n(x)$ denotes the empirical distribution and $F(x)$ the cdf of some known parametric distribution. 
+
+We can use the available posterior samples from the AntMAN output
+
+
+```{r}
+
+
+m_post = unlist(mix_post_draws$mu[[1]])
+w_post = mix_post_draws$W[[1]]
+sig2_post = unlist(mix_post_draws$sig2[[1]])
+
+
+```
+
+We opt to use R's built in ks.test function to get an exact estimate of the KS distance:
+
+```{r}
+
+Mixture_normal_cdf <- function(x, weight, mean, sd) sapply(x, function(data) sum(weight * pnorm(data, mean = mean, sd = sd)))
+ks.test(y, y = Mixture_normal_cdf, w = w_post, mean = m_post, sd = sqrt(sig2_post))$statistic
+
+```
+# Initialization Phase
+
+While SALSO starts with either a
+a. Sequential allocation or
+b. Uniform initialization of the partition
+we start by choosing the partition amongst our posterior draws that minimizes the chosen distance metric. 
+
+![SALSO Initialization phase](salso_initialization.png){width=99%}
+
+Our version:  
+for $j = 1$ to n_samples:  
+calculate distance of each sample keep partition c that minimizes W2 distance
+
+
+```{r}
+##| eval: false
+##| include: false
+
+
+# --- 1. KS distance for a mixture ---
+KS_distance_mixture <- function(data, w, mean, sig2) {
+  mixture_cdf <- function(x) sapply(x, function(xi) sum(w * pnorm(xi, mean = mean, sd = sqrt(sig2))))
+  as.numeric(ks.test(data, mixture_cdf)$statistic)
+}
+
+# --- 2. Distance wrapper (pluggable) ---
+compute_distance <- function(data, w, mean, sig2, method = "KS") {
+  if (method == "KS") {
+    KS_distance_mixture(data, w, mean, sig2)
+  } else {
+    stop("Unknown distance method")
+  }
+}
+
+# --- 3. Initialization phase using your posterior samples ---
+initialize_clustering <- function(data,
+                                  clustering_matrix,
+                                  posterior_params = NULL,
+                                  prior_list = NULL,
+                                  method = "KS") {
+  
+  n_candidates <- nrow(clustering_matrix)
+  distance <- numeric(n_candidates)
+  
+  for (i in seq_len(n_candidates)) {
+    if (!is.null(posterior_params)) {
+      # use given posterior parameters
+      w_i    <- posterior_params$w[[i]]
+      mu_i   <- posterior_params$mu_post[[i]]
+      sig2_i <- posterior_params$sigma2_post[[i]]
+    } else {
+      # compute posterior parameters from clustering
+      c_i <- clustering_matrix[i, ]
+      param_post <- mixture_posterior(c_i, data, prior_list)
+      w_i    <- param_post$weights
+      mu_i   <- param_post$mu_post
+      sig2_i <- param_post$sigma2_post
+    }
+    
+    distance[i] <- compute_distance(data, w_i, mu_i, sig2_i, method)
+  }
+  
+  best_index <- which.min(distance)
+  D_current <- distance[best_index]
+  c_current <- clustering_matrix[best_index,]
+  
+  return(list(D_current = D_current, c_current = c_current))
+}
+
+```
+    
+Test:
+
+```{r}
+
+# Prepare the AM output for the function
+posterior_params <- list(
+  w = lapply(mix_post_draws$W, unlist),
+  mu_post = lapply(mix_post_draws$mu, unlist),
+  sigma2_post = lapply(mix_post_draws$sig2, unlist)
+)
+
+clustering_matrix <- eam + 1
+
+# --- Usage ---
+init_res <- initialize_clustering(
+  data = y,
+  clustering_matrix = clustering_matrix,   # list of candidate clusterings
+  posterior_params = posterior_params,
+  method = "KS"
+)
+
+c_current <- init_res$c_current
+D_current <- init_res$D_current
+
+
+```
+
+    
+# Sweetening Phase
+
+In this phase we try to find a better clustering by iteratively removing items from their cluster and joining them with either an existing or a new cluster. The order of re-allocation is based on a random permutation.
+    
+Since the clusterings we are creating in this phase have not been visited by the MCMC Algorithm, we need to write a function to compute the posterior of a mixture model based on these new clusterings.
+
+```{r}
+
+mixture_posterior <- function(c_alloc, data, prior_list) {
+  # Extract priors
+  alpha_0 <- prior_list$alpha_0
+  kappa_0 <- prior_list$kappa_0
+  mu_0    <- prior_list$mu_0
+  a_0     <- prior_list$a_0
+  b_0     <- prior_list$b_0
+  
+  # Number of clusters (assumed labeled 1...K)
+  K <- max(c_alloc)
+  
+  # Preallocate
+  alpha_post  <- numeric(K)
+  mu_post     <- numeric(K)
+  sigma2_post <- numeric(K)
+  
+  for (k in seq_len(K)) {
+    y_k <- data[c_alloc == k]
+    n_k <- length(y_k)
+    
+    # Posterior for weights
+    alpha_post[k] <- alpha_0 + n_k
+    
+    # Posterior for mean
+    kappa_post <- kappa_0 + n_k
+    mu_post[k] <- (kappa_0 * mu_0 + sum(y_k)) / kappa_post
+    
+    # Posterior for variance (# Old code was using mean(y_k) instead of mu_post[k])
+    a_post <- a_0 + 0.5 * (n_k + 1)  # "+1" accounts for mean uncertainty
+    b_post <- b_0 + 0.5 * sum((y_k - mu_post[k])^2) +
+      0.5 * kappa_0 * (mu_post[k] - mu_0)^2
+    
+    sigma2_post[k] <- b_post / (a_post - 1)  # posterior mean of Inv-Gamma
+  }
+  
+  weights_post <- alpha_post / sum(alpha_post)  # expected Dirichlet
+  
+  list(
+    weights_post   = weights_post,
+    mu_post   = mu_post,
+    sigma2_post = sigma2_post
+  )
+}
+
+
+```
+
+
+```{r}
+
+sweetening <- function(c_current, data, prior_list, D_current,
+                       max_sweet_iter = 100, tol = 1e-10, method = "KS") {
+  
+  n_cluster <- max(c_current)
+  n_sweet <- 0
+  
+  while (n_sweet < max_sweet_iter) {
+    n_sweet <- n_sweet + 1
+    
+    # Loop over subjects in random order
+    random_perm <- sample(seq_along(c_current))
+    
+    for (i in random_perm) {
+      c_minus <- c_current[-i]
+      n_cluster <- max(c_minus) + 1
+      losses <- numeric(n_cluster)
+      
+      for (k in seq_len(n_cluster)) {
+        c_candidate <- append(c_minus, k, after = i - 1)
+        param_post <- mixture_posterior(c_candidate, data, prior_list)
+        losses[k] <- compute_distance(data,
+                                      w = param_post$weights,
+                                      mean = param_post$mu_post,
+                                      sig2 = param_post$sigma2_post,
+                                      method = method)
+      }
+      
+      # Reassign i
+      c_current[i] <- which.min(losses)
+    }
+    
+    D_new <- min(losses)
+    
+    if (abs(D_new - D_current) < tol) {
+      D_current <- D_new
+      break
+    }
+    
+    D_current <- D_new
+  }
+  
+  return(list(c_current = c_current, D_current = D_current, n_sweet = n_sweet))
+}
+
+
+```
+    
+## Test
+
+```{r}
+
+# Example prior list for a univariate Gaussian mixture
+prior_list <- list(
+  alpha_0 = 1,       # Dirichlet concentration for mixture weights
+  kappa_0 = 0.01,    # pseudo-count for mean prior
+  mu_0    = 0,       # prior mean for component means
+  a_0     = 2,       # shape parameter for inverse-gamma prior on variance
+  b_0     = 1        # scale parameter for inverse-gamma prior on variance
+)
+
+# best_init_index <- init_res$best_index
+# D_current <- init_res$D_current
+# c_current <- eam[best_init_index, ]
+
+sweet_res <- sweetening(c_current, data = y, prior_list, D_current,
+                       max_sweet_iter = 100, tol = 1e-10, method = "KS")
+
+```
+
+# Cluster resilience a.k.a. Zealous Updates Phase
+    
+    
+```{r}
+
+fulfill_gap_label <- function(c_vec){
+  # relabel c_vec to make sure there are no empty clusters
+  n_unique_label = length(unique(c_vec))
+  n_cluster = max(c_vec)
+  if(n_unique_label==n_cluster){
+    return(c_vec)
+  }else{
+    label_unique = unique(c_vec)
+    c_vec_relabel = rep(NA,length(c_vec))
+    for (i in 1:length(c_vec)) {
+      c_vec_relabel[i] = which(label_unique == c_vec[i])
+    }
+    return(c_vec_relabel)
+  }
+}
+
+```
+    
+    
+```{r}
+
+merge_split_phase <- function(c_current,
+                              D_current,
+                              data,
+                              prior_list,
+                              n_max   = 1,
+                              n_merge = 1,
+                              n_split = 1,
+                              method  = "KS") {
+  
+  n_cluster <- max(c_current)
+  n_merge_accept <- 0
+  n_split_accept <- 0
+  
+  if (n_max > 0) {
+    for (iter in seq_len(n_max)) {
+      
+      # --- Merging step ---
+      if (n_cluster > 1) {
+        pairs <- t(combn(1:n_cluster, 2))
+        merge_pairs <- pairs[sample(nrow(pairs), min(n_merge, nrow(pairs))), , drop = FALSE]
+        
+        for (j in seq_len(nrow(merge_pairs))) {
+          clusters_to_merge <- merge_pairs[j, ]
+          c_merge <- c_current
+          c_merge[c_merge == clusters_to_merge[1]] <- clusters_to_merge[2]
+          c_merge <- fulfill_gap_label(c_merge)
+          
+          param_post <- mixture_posterior(c_merge, data, prior_list)
+          D_new <- compute_distance(data,
+                                    w    = param_post$weights,
+                                    mean = param_post$mu_post,
+                                    sig2 = param_post$sigma2_post,
+                                    method = method)
+          if (D_new < D_current) {
+            c_current <- c_merge
+            n_cluster <- max(c_current)
+            D_current <- D_new
+            n_merge_accept <- n_merge_accept + 1
+          }
+        }
+      }
+      
+      # --- Splitting step ---
+      c_split <- c_current
+      
+      for (j in seq_len(min(n_split, n_cluster))) {
+        cl_to_split <- sample(1:n_cluster, 1)
+        idx_split <- which(c_current == cl_to_split)
+        
+        # random binary split
+        for (i in idx_split) {
+          if (runif(1) < 0.5) {
+            c_split[i] <- n_cluster + 1
+          }
+        }
+        c_split <- fulfill_gap_label(c_split)
+        
+        param_post <- mixture_posterior(c_split, data, prior_list)
+        D_new <- compute_distance(data,
+                                  w    = param_post$weights,
+                                  mean = param_post$mu_post,
+                                  sig2 = param_post$sigma2_post,
+                                  method = method)
+        if (D_new < D_current) {
+          c_current <- c_split
+          n_cluster <- max(c_current)
+          D_current <- D_new
+          n_split_accept <- n_split_accept + 1
+        }
+      }
+    }
+  }
+  
+  list(
+    c_current      = c_current,
+    D_current      = D_current,
+    n_cluster      = n_cluster,
+    n_merge_accept = n_merge_accept,
+    n_split_accept = n_split_accept
+  )
+}
+
+```
+
+### Test
+
+
+```{r}
+
+c_current = sweet_res$c_current
+
+m_s_res <- merge_split_phase(c_current, D_current,
+                              data = y,
+                              prior_list,
+                              n_max   = 1,
+                              n_merge = 1,
+                              n_split = 1,
+                              method  = "KS")
+
+m_s_res$c_current
+
+```
+
+    
+# Main function
+
+Putting it all together, the following function computes full runs of the Algorithm.
+
+```{r}
+
+# Main clustering pipeline (keeps original structure)
+run_clustering <- function(data,
+                           clustering_matrix,
+                           posterior_draws,   
+                           prior_list,
+                           method         = "KS",
+                           n_runs         = 10,
+                           max_sweet_iter = 100,
+                           tol            = 1e-10,
+                           n_max          = 1,
+                           n_merge        = 1,
+                           n_split        = 1) {
+  
+  # storage (per-run)
+  distance_record <- numeric(n_runs)           # stores current distance after each run
+  total_accepted_sweets <- integer(n_runs)
+  total_accepted_merges <- integer(n_runs)           # accepted merges per run
+  total_accepted_splits <- integer(n_runs)           # accepted splits per run
+
+
+  for (run in seq_len(n_runs)) {
+    print(run)
+    ## ---------------------------
+    ## 1) Initialization phase
+    ## ---------------------------
+    init_res <- initialize_clustering(
+      data = y,
+      clustering_matrix = clustering_matrix,   # list of candidate clusterings
+      posterior_params = posterior_params,
+      method = "KS"
+    )
+
+    c_current <- init_res$c_current
+    D_current  <- init_res$D_current
+    
+    ## ---------------------------
+    ## 2) Sweetening phase
+    ## ---------------------------
+    sweet_res <- sweetening(
+      c_current   = c_current,
+      data        = data,
+      prior_list  = prior_list,
+      D_current   = D_current,
+      max_sweet_iter = max_sweet_iter,
+      tol         = tol,
+      method      = method
+    )
+    c_current <- sweet_res$c_current
+    D_current <- sweet_res$D_current
+    total_accepted_sweets[run] <- sweet_res$n_sweet
+
+    ## ---------------------------
+    ## 3) Merge–Split phase
+    ## ---------------------------
+    ms_res <- merge_split_phase(
+      c_current  = c_current,
+      D_current  = D_current,
+      data       = data,
+      prior_list = prior_list,
+      n_max      = n_max,
+      n_merge    = n_merge,
+      n_split    = n_split,
+      method     = method
+    )
+
+    # update clustering and distance
+    c_current <- ms_res$c_current
+    D_current <- ms_res$D_current
+    # record accepted merges/splits
+    total_accepted_merges[run] <-  ms_res$n_merge_accept
+    total_accepted_splits[run] <- ms_res$n_split_accept 
+
+    # record distance
+    distance_record[run] <- D_current
+  }
+
+  # return final clustering and diagnostics
+  list(
+    clustering = c_current,
+    distance_record = distance_record,         
+    total_accepted_merges = total_accepted_merges,
+    total_accepted_splits = total_accepted_splits,
+    total_accepted_sweets = total_accepted_sweets
+  )
+}
+
+
+
+
+```
+
+### Test
+
+```{r}
+
+# Prepare the AM output for the function
+posterior_params <- list(
+  w = lapply(mix_post_draws$W, unlist),
+  mu_post = lapply(mix_post_draws$mu, unlist),
+  sigma2_post = lapply(mix_post_draws$sig2, unlist)
+)
+
+clustering_matrix <- eam + 1
+
+results <- run_clustering(data = y,
+               clustering_matrix = clustering_matrix,
+               posterior_draws,   
+               prior_list,
+               method         = "KS",
+               n_runs         = 10,
+               max_sweet_iter = 100,
+               tol            = 1e-10,
+               n_max          = 1,
+               n_merge        = 1,
+               n_split        = 1)
+
+results$clustering
+
+```
+
+    
+    
+    

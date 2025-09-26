@@ -19,6 +19,8 @@ execute:
 library(AntMAN)
 library(salso)
 library(tidyverse)
+library(Rcpp)
+library(RcppArmadillo)
 source("../R/mixture_utils.R")
 
 ```
@@ -101,16 +103,17 @@ mix_post_draws <- AntMAN::AM_mcmc_fit(
 eam <- AM_clustering(mix_post_draws)  # M*n matrix
 
 ```
-
+Plot the simulated data
 
 ```{r}
 
-# Compute Binder and VI estimates:
-AMcluster_binder = AM_salso(eam, "binder")
-AMcluster_VI = AM_salso(eam, "VI")
+c_binder <- salso(eam, loss = "binder")
+c_vi <- salso(eam, loss = "VI")
+
+plot(y, rep(0,n), col = c_binder, pch = 19)
+plot(y, rep(0,n), col = c_vi, pch = 19)
 
 ```
-
 
 
 ## Distance function
@@ -165,6 +168,24 @@ Mixture_normal_cdf <- function(x, weight, mean, sd) sapply(x, function(data) sum
 ks.test(y, y = Mixture_normal_cdf, w = w_post, mean = m_post, sd = sqrt(sig2_post))$statistic
 
 ```
+### Wassterstein distance
+For now we just accept the cpp functions given by XJ:
+
+```{r}
+sourceCpp("../R/W2-functions.cpp")
+```
+
+
+```{r}
+
+compute_distance(data = y, w = w_post, mean = m_post, sig2 = sig2_post, method = "W2")
+
+```
+### Pearson distance
+
+Continue here testing the Pearson distance and then integrating it into the compute_distance function.
+
+
 # Initialization Phase
 
 While SALSO starts with either a
@@ -527,7 +548,7 @@ Putting it all together, the following function computes full runs of the Algori
 
 ```{r}
 
-# Main clustering pipeline (keeps original structure)
+# Main clustering
 run_clustering <- function(data,
                            clustering_matrix,
                            posterior_draws,   
@@ -614,13 +635,20 @@ run_clustering <- function(data,
 }
 
 
-
-
 ```
 
 ### Test
 
 ```{r}
+
+# Example prior list for a univariate Gaussian mixture
+prior_list <- list(
+  alpha_0 = 1,       # Dirichlet concentration for mixture weights
+  kappa_0 = 0.01,    # pseudo-count for mean prior
+  mu_0    = 0,       # prior mean for component means
+  a_0     = 2,       # shape parameter for inverse-gamma prior on variance
+  b_0     = 1        # scale parameter for inverse-gamma prior on variance
+)
 
 # Prepare the AM output for the function
 posterior_params <- list(

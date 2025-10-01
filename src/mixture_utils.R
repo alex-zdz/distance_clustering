@@ -242,12 +242,12 @@ initialize_clustering <- function(data,
 
 #Sweetening Phase
 sweetening <- function(c_current, data, prior_list, D_current,
-                       max_sweet_iter = 100, tol = 1e-10, method = "KS") {
+                       n_sweet = 100, tol = 1e-10, method = "KS") {
   
-  n_sweet <- 0
+  run_sweet <- 0
   
-  while (n_sweet < max_sweet_iter) {
-    n_sweet <- n_sweet + 1
+  while (run_sweet < n_sweet) {
+    run_sweet <- run_sweet + 1
     
     # Loop over subjects in random order
     random_perm <- sample(seq_along(c_current))
@@ -289,7 +289,7 @@ merge_split_phase <- function(c_current,
                               D_current,
                               data,
                               prior_list,
-                              n_max   = 1,
+                              n_ms   = 1,
                               n_merge = 1,
                               n_split = 1,
                               method  = "KS") {
@@ -298,8 +298,8 @@ merge_split_phase <- function(c_current,
   n_merge_accept <- 0
   n_split_accept <- 0
   
-  if (n_max > 0) {
-    for (iter in seq_len(n_max)) {
+  if (n_ms > 0) {
+    for (iter in seq_len(n_ms)) {
       
       # --- Merging step ---
       if (n_cluster > 1) {
@@ -374,9 +374,9 @@ run_clustering <- function(data,
                            prior_list,
                            method         = "KS",
                            n_runs         = 10,
-                           max_sweet_iter = 100,
+                           n_sweet = 100,
                            tol            = 1e-10,
-                           n_max          = 1,
+                           n_ms          = 1,
                            n_merge        = 1,
                            n_split        = 1) {
   
@@ -410,7 +410,7 @@ run_clustering <- function(data,
       data        = data,
       prior_list  = prior_list,
       D_current   = D_current,
-      max_sweet_iter = max_sweet_iter,
+      n_sweet = n_sweet,
       tol         = tol,
       method      = method
     )
@@ -426,7 +426,7 @@ run_clustering <- function(data,
       D_current  = D_current,
       data       = data,
       prior_list = prior_list,
-      n_max      = n_max,
+      n_ms      = n_ms,
       n_merge    = n_merge,
       n_split    = n_split,
       method     = method

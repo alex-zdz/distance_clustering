@@ -872,9 +872,9 @@ results <- run_clustering(data = y,
                prior_list,
                method         = "KS",
                n_runs         = 3,
-               max_sweet_iter = 100,
+               n_sweet        = 100,
                tol            = 1e-10,
-               n_max          = 3,
+               n_ms_max       = 3,
                n_merge        = 3,
                n_split        = 3)
 

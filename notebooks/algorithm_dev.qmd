@@ -21,6 +21,7 @@ library(salso)
 library(tidyverse)
 library(Rcpp)
 library(RcppArmadillo)
+library(fossil)
 source("../R/mixture_utils.R")
 
 ```
@@ -116,7 +117,7 @@ plot(y, rep(0,n), col = c_vi, pch = 19)
 ```
 
 
-## Distance function
+# Distance function
 
 The focal point of our paper is the usage of functions that measure the distance between probability distributions, specifically the empirical distribution and the posterior of a mixture model. Since the posterior of a mixture represents a clustering, we can optimize the clustering by minimizing the distance.
 
@@ -139,7 +140,7 @@ FN[2] == test(y[2])
 FN[2];test(y[2])
 
 ```
-For the purpose of visualization we start with the Kolmogorov Smrinoff distance:
+For the purpose of visualization we start with the Kolmogorov Smirnov  distance:
 
 $$
 D_{KS} &= \sup_x|F_n(x)-F(x)|
@@ -160,19 +161,118 @@ sig2_post = unlist(mix_post_draws$sig2[[1]])
 
 ```
 
-We opt to use R's built in ks.test function to get an exact estimate of the KS distance:
+We opt to use R's built in ks.test function to get an exact estimate of the KS distance. Note that the function can take samples as input or an actual cdf.
+
+```{r}
+# simulate data
+set.seed(42)
+
+N <- 100
+K <- 3
+alpha_0 <- 1
+
+simdata <- generate_mixture_data(
+  N,
+  K = K,
+  type = "Gaussian",
+  alpha = alpha_0,
+  means = 0,
+  sds = 1,
+  skews = NULL
+)
+
+y <- simdata$data
+cluster_true <- simdata$cluster_true
+weights_true <- simdata$weights_true
+
+prior_list <- list(
+    alpha_0 = 1,       # Dirichlet concentration for mixture weights
+    kappa_0 = 1,   
+    mu_0    = 0,       # prior mean for component means
+    a_0     = 2,       # shape parameter for inverse-gamma prior on variance
+    b_0     = 1        # scale parameter for inverse-gamma prior on variance
+  )
+
+```
+
+what happens if we give 2 samples to the function:
+
+```{r}
+x1 = rnorm(10, 0, 1)
+x2 = rnorm(10, 0.1, 1)
+
+ks.test(x1, x2)
+
+```
+The function performs an "Exact two-sample Kolmogorov-Smirnov test":
+
+What if we pass the sample and a cdf:
 
 ```{r}
 
-Mixture_normal_cdf <- function(x, weight, mean, sd) sapply(x, function(data) sum(weight * pnorm(data, mean = mean, sd = sd)))
-ks.test(y, y = Mixture_normal_cdf, w = w_post, mean = m_post, sd = sqrt(sig2_post))$statistic
+ks.test(y, y = mixture_cdf, w = param_post$weights, mean = param_post$mu_post, sig2 = param_post$sigma2_post)
+
 
 ```
-### Wassterstein distance
+We get the "Asymptotic one-sample Kolmogorov-Smirnov test", which src code performs the following:
+
+```{r}
+
+n <- length(x)
+# taken from the source code of the function
+x <- mixture_cdf(sort(y), weight = param_post$weights,
+                     mean = param_post$mu_post,
+                     sig2 = param_post$sigma2_post) - (0:(n - 1))/n # subtract the ecdf
+
+# compute the left and right limits since the ecdf is a step function and therefore has 2 values to be compared to at each value x
+#c(x, 1/n - x)
+
+max(c(x, 1/n - x))
+
+```
+We could potentially manually compare the ecdf with the evaluated mixture cdf, but we should still be cautious about the left and right limit.
+Using the evaluated mixture cdf in the ks.test function would be wrong, as well as passing the results of ecdf(y).
+
+Using the correct clustering we get the following metric
+
+```{r}
+
+c_minus <- cluster_true[-10]
+c_candidate <- cluster_true
+param_post <- mixture_posterior(c_candidate, y, prior_list)
+kstat <- as.numeric(ks.test(y, y = mixture_cdf, w = param_post$weights, mean = param_post$mu_post, sig2 = param_post$sigma2_post)$statistic)
+print(kstat)
+#0.09412532
+```
+
+and switching individual items
+
+
+```{r}
+for (k in seq_len(3)) {
+  
+  c_candidate <- append(c_minus, k, after = i - 1)
+  param_post <- mixture_posterior(c_candidate, y, prior_list)
+  
+  kstat <- as.numeric(ks.test(y, y = mixture_cdf, w = param_post$weights, mean = param_post$mu_post, sig2 = param_post$sigma2_post)$statistic)
+
+  print(kstat)
+  
+}
+
+```
+
+[1] 0.1052703
+[1] 0.1054517
+[1] 0.103933
+
+## Wassterstein distance
 For now we just accept the cpp functions given by XJ:
 
 ```{r}
+
 sourceCpp("../R/W2-functions.cpp")
+
 ```
 
 
@@ -181,10 +281,64 @@ sourceCpp("../R/W2-functions.cpp")
 compute_distance(data = y, w = w_post, mean = m_post, sig2 = sig2_post, method = "W2")
 
 ```
-### Pearson distance
+If we plug in the true clustering we get
+
+```{r}
+
+c_candidate <- cluster_true
+param_post <- mixture_posterior(c_candidate, y, prior_list)
+compute_distance(data = y, w = param_post$weights, mean = param_post$mu_post, sig2 = param_post$sigma2_post, method = "W2")
+ 
+```
+Compared to switched items from the sweetening phase:
+
+```{r}
+
+for (k in seq_len(3)){
+  
+  c_candidate <- append(c_minus, k, after = i - 1)
+  param_post <- mixture_posterior(c_candidate, y, prior_list)
+  print(compute_distance(data = y, w = param_post$weights, mean = param_post$mu_post, sig2 = param_post$sigma2_post, method = "W2"))
+  
+}
+
+```
+
+
+## Pearson distance
 
 Continue here testing the Pearson distance and then integrating it into the compute_distance function.
 
+```{r}
+
+Pearson_mixture_distance(data = y, w = w_post, mean = m_post, sig2 = sig2_post)
+
+compute_distance(data = y, w = w_post, mean = m_post, sig2 = sig2_post, method = "Pearson")
+
+```
+If we plug in the true clustering we get
+
+```{r}
+
+c_candidate <- cluster_true
+param_post <- mixture_posterior(c_candidate, y, prior_list)
+Pearson_mixture_distance(data = y, w = param_post$weights, mean = param_post$mu_post, sig2 = param_post$sigma2_post)
+
+```
+Compared to switched items from the sweetening phase:
+
+```{r}
+
+for (k in seq_len(3)){
+  
+  c_candidate <- append(c_minus, k, after = i - 1)
+  param_post <- mixture_posterior(c_candidate, y, prior_list)
+  print(Pearson_mixture_distance(data = y, w = param_post$weights, mean = param_post$mu_post, sig2 = param_post$sigma2_post))
+  
+}
+
+```
+significant difference, should work!
 
 # Initialization Phase
 
@@ -644,7 +798,7 @@ run_clustering <- function(data,
 # Example prior list for a univariate Gaussian mixture
 prior_list <- list(
   alpha_0 = 1,       # Dirichlet concentration for mixture weights
-  kappa_0 = 0.01,    # pseudo-count for mean prior
+  kappa_0 = 1,    # pseudo-count for mean prior
   mu_0    = 0,       # prior mean for component means
   a_0     = 2,       # shape parameter for inverse-gamma prior on variance
   b_0     = 1        # scale parameter for inverse-gamma prior on variance
@@ -652,7 +806,7 @@ prior_list <- list(
 
 # Prepare the AM output for the function
 posterior_params <- list(
-  w = lapply(mix_post_draws$W, unlist),
+  weight = lapply(mix_post_draws$W, unlist),
   mu_post = lapply(mix_post_draws$mu, unlist),
   sigma2_post = lapply(mix_post_draws$sig2, unlist)
 )
@@ -675,6 +829,209 @@ results$clustering
 
 ```
 
+# Comparison to old versions:
+
+## Source Xuejins version and my raw version
+
+```{r}
+
+source("C:/Users/alexm/NUS Dropbox/Alexander Mozdzen/distance_clustering/old_code/Salso-functions-generalformat.R")
+# new function
+source("C:/Users/alexm/NUS Dropbox/Alexander Mozdzen/distance_clustering/old_code/alex_raw/main_raw.R")
+source("C:/Users/alexm/NUS Dropbox/Alexander Mozdzen/distance_clustering/old_code/alex_raw/KS-functions-1d_raw.R")
+
+
+```
+
+## Run all versions
+
+```{r}
+
+c_sample <- apply(eam, 2, function(x) x + 1)
+
+```
+
+
+```{r}
+# prior
+prior_list_old = list("alpha" = 1, "kappa0" = 1, "theta" = 0, "a" = 1, "b" = 1)
+res_KS_xj = Salso_whole_procedure(eam, y, prior_list_old, KS_distance_mixture, n_runs=3, n_max=3)
+
+res_KS_ax = mde_main(c_sample = clustering_matrix , data = y, prior_list_old,
+                     distance_function = KS_distance_mixture,
+                     n_runs = 3, n_max = 3, n_split = 3)
+```
+
+
+```{r}
+# New:
+
+results <- run_clustering(data = y,
+               clustering_matrix = clustering_matrix,
+               posterior_params = posterior_params,   
+               prior_list,
+               method         = "KS",
+               n_runs         = 3,
+               max_sweet_iter = 100,
+               tol            = 1e-10,
+               n_max          = 3,
+               n_merge        = 3,
+               n_split        = 3)
+
+results$clustering
+
+
+```
+
+
+
+
+```{r}
+
+
+adj.rand.index(cluster_true, res_KS_ax)
+
+adj.rand.index(cluster_true, res_KS_xj)
+
+adj.rand.index(cluster_true, results$clustering)
+
+
+```
+# Testing the main function
+
+
+```{r}
+
+
+# Main clustering
+run_clustering <- function(data,
+                           clustering_matrix,
+                           posterior_draws,   
+                           prior_list,
+                           method         = "KS",
+                           n_runs         = 10,
+                           max_sweet_iter = 100,
+                           tol            = 1e-10,
+                           n_max          = 1,
+                           n_merge        = 1,
+                           n_split        = 1) {
+  
+  # storage (per-run)
+  distance_record <- numeric(n_runs)           # stores current distance after each run
+  total_accepted_sweets <- integer(n_runs)
+  total_accepted_merges <- integer(n_runs)           # accepted merges per run
+  total_accepted_splits <- integer(n_runs)           # accepted splits per run
+
+
+  for (run in seq_len(n_runs)) {
+    print(run)
+    ## ---------------------------
+    ## 1) Initialization phase
+    ## ---------------------------
+    init_res <- initialize_clustering(
+      data = y,
+      clustering_matrix = clustering_matrix,   # list of candidate clusterings
+      posterior_params = posterior_params,
+      method = "KS"
+    )
+
+    c_current <- init_res$c_current
+    D_current  <- init_res$D_current
     
+    ## ---------------------------
+    ## 2) Sweetening phase
+    ## ---------------------------
+    # sweet_res <- sweetening(
+    #   c_current   = c_current,
+    #   data        = data,
+    #   prior_list  = prior_list,
+    #   D_current   = D_current,
+    #   max_sweet_iter = max_sweet_iter,
+    #   tol         = tol,
+    #   method      = method
+    # )
+    
+  n_sweet <- 0
+  
+  while (n_sweet < max_sweet_iter) {
+    n_sweet <- n_sweet + 1
+    
+    # Loop over subjects in random order
+    random_perm <- sample(seq_along(c_current))
+    
+    for (i in random_perm) {
+      c_minus <- c_current[-i]
+      K_sweet <- max(c_minus) + 1
+      losses <- numeric(K_sweet)
+      
+      for (k in seq_len(K_sweet)) {
+        c_candidate <- append(c_minus, k, after = i - 1)
+        param_post <- mixture_posterior(c_candidate, data, prior_list)
+        losses[k] <- compute_distance(data,
+                                      weight = param_post$weights,
+                                      mean = param_post$mu_post,
+                                      sig2 = param_post$sigma2_post,
+                                      method = method)
+      }
+      
+      # Reassign i
+      c_current[i] <- which.min(losses)
+    }
+    
+    D_new <- min(losses)
+    
+    if (abs(D_new - D_current) < tol) {
+      D_current <- D_new
+      break
+    }
+    
+    D_current <- D_new
+  }
+  
+  return(list(c_current = c_current, D_current = D_current, n_sweet = n_sweet))
+}
+
+    
+    c_current <- sweet_res$c_current
+    D_current <- sweet_res$D_current
+    total_accepted_sweets[run] <- sweet_res$n_sweet
+
+    ## ---------------------------
+    ## 3) Merge–Split phase
+    ## ---------------------------
+    ms_res <- merge_split_phase(
+      c_current  = c_current,
+      D_current  = D_current,
+      data       = data,
+      prior_list = prior_list,
+      n_max      = n_max,
+      n_merge    = n_merge,
+      n_split    = n_split,
+      method     = method
+    )
+
+    # update clustering and distance
+    c_current <- ms_res$c_current
+    D_current <- ms_res$D_current
+    # record accepted merges/splits
+    total_accepted_merges[run] <-  ms_res$n_merge_accept
+    total_accepted_splits[run] <- ms_res$n_split_accept 
+
+    # record distance
+    distance_record[run] <- D_current
+  }
+
+  # return final clustering and diagnostics
+  list(
+    clustering = c_current,
+    distance_record = distance_record,         
+    total_accepted_merges = total_accepted_merges,
+    total_accepted_splits = total_accepted_splits,
+    total_accepted_sweets = total_accepted_sweets
+  )
+}
+
+```
+
     
     

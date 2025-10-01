@@ -84,15 +84,12 @@ generate_mixture_data <- function(
 #Mixture_normal_cdf = function(x,w,u,s) sum( w*pnorm(x,mean=u,sd=sqrt(s)) )
 mixture_cdf <- function(x, weight, mean, sig2) sapply(x, function(xi) sum(weight * pnorm(xi, mean = mean, sd = sqrt(sig2))))
 
-KS_distance_mixture <- function(data, w, mean, sig2) {
-  current_mixture_cdf <- mixture_cdf(x, weight, mean, sig2)
-  as.numeric(ks.test(data, mixture_cdf)$statistic)
+KS_mixture_distance <- function(data, weight, mean, sig2) {
+  as.numeric(ks.test(data, mixture_cdf, weight, mean, sig2)$statistic)
 }
 
-
-
 # Pearson distance new:
-Pearson_distance_mixture <- function(data, weight, mean, sig2) {
+Pearson_mixture_distance <- function(data, weight, mean, sig2) {
   n <- length(data)
   Fn <- ecdf(data)
   bins <- seq(-50, 50, by = 0.5)
@@ -118,10 +115,6 @@ Pearson_distance_mixture <- function(data, weight, mean, sig2) {
 
 
 
-
-
-
-
 #' Compute Distance Between Data and Mixture
 #'
 #' Wrapper function for computing distances between observed data and a Gaussian mixture.
@@ -141,11 +134,13 @@ Pearson_distance_mixture <- function(data, weight, mean, sig2) {
 #' compute_distance(data, w = c(0.5, 0.5), mean = c(0, 2), sig2 = c(1, 1), method = "KS")
 #'
 #' @export
-compute_distance <- function(data, w, mean, sig2, method = "KS") {
+compute_distance <- function(data, weight, mean, sig2, method = "KS") {
   if (method == "KS") {
-    KS_distance_mixture(data, w, mean, sig2)
+    KS_mixture_distance(data, weight, mean, sig2)
   }else if (method == "W2") {
-    W2(data, w, mean, sig2)
+    W2(data, weight, mean, sig2)
+  } else if (method == "Pearson") {
+    Pearson_mixture_distance(data, weight, mean, sig2)
   } else {
     stop("Unknown distance method")
   }
@@ -154,7 +149,7 @@ compute_distance <- function(data, w, mean, sig2, method = "KS") {
 # Prepare AntMAN output:
 prepare_AM_posterior_params <- function(mix_post_draws) {
   list(
-    w = lapply(mix_post_draws$W, unlist),
+    weight = lapply(mix_post_draws$W, unlist),
     mu_post = lapply(mix_post_draws$mu, unlist),
     sigma2_post = lapply(mix_post_draws$sig2, unlist)
   )
@@ -220,7 +215,7 @@ initialize_clustering <- function(data,
   for (i in seq_len(n_candidates)) {
     if (!is.null(posterior_params)) {
       # use given posterior parameters
-      w_i    <- posterior_params$w[[i]]
+      w_i    <- posterior_params$weight[[i]]
       mu_i   <- posterior_params$mu_post[[i]]
       sig2_i <- posterior_params$sigma2_post[[i]]
     } else {
@@ -266,7 +261,7 @@ sweetening <- function(c_current, data, prior_list, D_current,
         c_candidate <- append(c_minus, k, after = i - 1)
         param_post <- mixture_posterior(c_candidate, data, prior_list)
         losses[k] <- compute_distance(data,
-                                      w = param_post$weights,
+                                      weight = param_post$weights,
                                       mean = param_post$mu_post,
                                       sig2 = param_post$sigma2_post,
                                       method = method)
@@ -319,7 +314,7 @@ merge_split_phase <- function(c_current,
           
           param_post <- mixture_posterior(c_merge, data, prior_list)
           D_new <- compute_distance(data,
-                                    w    = param_post$weights,
+                                    weight    = param_post$weights,
                                     mean = param_post$mu_post,
                                     sig2 = param_post$sigma2_post,
                                     method = method)
@@ -349,7 +344,7 @@ merge_split_phase <- function(c_current,
         
         param_post <- mixture_posterior(c_split, data, prior_list)
         D_new <- compute_distance(data,
-                                  w    = param_post$weights,
+                                  weight    = param_post$weights,
                                   mean = param_post$mu_post,
                                   sig2 = param_post$sigma2_post,
                                   method = method)

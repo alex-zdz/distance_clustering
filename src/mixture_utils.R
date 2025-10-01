@@ -46,7 +46,7 @@ generate_mixture_data <- function(
   cluster_true <- sample(1:K, N, replace = TRUE, prob = weights_true)
   
   #--- Set default parameters if not provided ---
-  if (is.null(means)) means <- seq(-2, 2, length.out = K)
+  if (is.null(means)) means <- seq(-K, K, length.out = K)
   if (is.null(sds)) sds <- rep(1, K)
   if (type %in% c("Skew Gaussian", "Skew-symmetric") & is.null(skews)) skews <- rep(0, K)
   

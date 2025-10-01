@@ -393,7 +393,7 @@ run_clustering <- function(data,
     ## 1) Initialization phase
     ## ---------------------------
     init_res <- initialize_clustering(
-      data              = y,
+      data              = data,
       clustering_matrix = clustering_matrix,   # list of candidate clusterings
       posterior_params  = posterior_params,
       method            = method
@@ -426,7 +426,7 @@ run_clustering <- function(data,
       D_current  = D_current,
       data       = data,
       prior_list = prior_list,
-      n_ms      = n_ms,
+      n_ms       = n_ms,
       n_merge    = n_merge,
       n_split    = n_split,
       method     = method

@@ -1,0 +1,179 @@
+---
+title: "Simulation Study Analysis"
+format: html
+---
+
+We start by loading the required libraries and reading in the parameter grid and results files.
+
+```{r}
+
+getwd()
+
+```
+
+
+```{r}
+library(tidyverse)
+library(patchwork)
+
+param_grid <- readRDS("../results/simstudy/02102025/grid/grid.rds")
+res_dir <- "../results/simstudy/02102025/"
+
+files <- list.files(res_dir, pattern = "\\.rds$", full.names = TRUE)
+results_df <- map_dfr(files, readRDS)
+
+results.l <- results_df %>% 
+  left_join(param_grid %>% mutate(run = row_number()), by = "run") %>% 
+  select(-c("err_clustering", "err_ari")) %>% 
+  pivot_longer(cols = c(ari , time_sec), names_to = "para", values_to = "value")
+
+head(results.l)
+```
+
+### 1. Data Length Comparison
+
+We visualize how the data length affects ARI. More data almost always leads to a better result.
+
+```{r}
+results.l %>%
+  filter(para == "ari") %>% 
+  ggplot(aes(x = factor(method), y = value, fill = factor(data_lengths))) +
+  stat_summary(fun = mean, geom = "bar", position = position_dodge()) +
+  stat_summary(fun.data = mean_se, geom = "errorbar",
+               position = position_dodge(width = 0.9), width = 0.2) +
+  theme_minimal()
+```
+
+### 2. Method Comparison
+
+We compare methods across data lengths. For now, the effect is not very clear.
+
+```{r}
+results.l %>%
+  filter(para == "ari") %>% 
+  ggplot(aes(x = factor(data_lengths), y = value, fill = factor(method))) +
+  stat_summary(fun = mean, geom = "bar", position = position_dodge()) +
+  stat_summary(fun.data = mean_se, geom = "errorbar",
+               position = position_dodge(width = 0.9), width = 0.2) +
+  facet_grid(n_runs  ~ n_sweet) +
+  theme_minimal()
+```
+
+### 3. Effect of n_runs and n_sweet
+
+Aggregating before plotting to see the effect of n_runs and n_sweet on ARI. It looks like n_sweet improves drastically from 1 to 5, then plateaus.
+
+```{r}
+results.l %>%
+  filter(para == "ari") %>%
+  group_by(n_runs, method, n_sweet) %>%
+  summarise(mean_ari = mean(value), .groups = "drop") %>%
+  ggplot(aes(x = n_runs, y = mean_ari, color = method)) +
+  geom_line() + geom_point() +
+  facet_wrap(~ n_sweet,
+             labeller = labeller(n_sweet = function(x) paste0("n_sweet = ", x)),
+             scales = "fixed")
+```
+
+### 4. Comparing ARI and Runtime
+
+We visualize ARI and runtime together to compare performance and cost.
+
+```{r}
+p1 <- results.l %>%
+  filter(para == "ari") %>%
+  group_by(n_runs, method, n_sweet) %>%
+  summarise(mean_ari = mean(value), .groups = "drop") %>%
+  ggplot(aes(x = n_runs, y = mean_ari, color = method)) +
+  geom_line() + geom_point() +
+  facet_wrap(~ n_sweet,
+             labeller = labeller(n_sweet = function(x) paste0("n_sweet = ", x))) +
+  labs(y = "ARI")
+
+p2 <- results.l %>%
+  filter(para == "time_sec") %>%
+  group_by(n_runs, method, n_sweet) %>%
+  summarise(mean_time = mean(value), .groups = "drop") %>%
+  ggplot(aes(x = n_runs, y = mean_time, color = method)) +
+  geom_line() + geom_point() +
+  facet_wrap(~ n_sweet) +
+  labs(y = "Time (sec)")
+
+p1 / p2
+```
+
+### 5. Runtime without W2
+
+Removing W2 to see time changes for the other methods.
+
+```{r}
+results.l %>%
+  filter(para == "time_sec", method != "W2") %>%
+  group_by(n_runs, method, n_sweet) %>%
+  summarise(mean_time = mean(value), .groups = "drop") %>%
+  ggplot(aes(x = n_runs, y = mean_time, color = method)) +
+  geom_line() + geom_point() +
+  facet_wrap(~ n_sweet) +
+  labs(y = "Time (sec)")
+```
+
+### 6. Effect of n_merge on ARI
+
+Higher n_merge seems to worsen ARI.
+
+```{r}
+results.l %>%
+  filter(para == "ari") %>%
+  group_by(method, n_merge, n_ms) %>%
+  summarise(mean_ari = mean(value), .groups = "drop") %>%
+  ggplot(aes(x = n_merge, y = mean_ari, color = method)) +
+  geom_line() + geom_point() +
+  facet_wrap(~ n_ms, ncol = 4,
+             labeller = labeller(n_ms = function(x) paste0("n_ms = ", x)))
+```
+
+### 7. Effect of n_split on ARI
+
+Results are inconsistent and mostly inconclusive.
+
+```{r}
+results.l %>%
+  filter(para == "ari") %>%
+  group_by(method, n_split, n_ms) %>%
+  summarise(mean_ari = mean(value), .groups = "drop") %>%
+  ggplot(aes(x = n_split, y = mean_ari, color = method)) +
+  geom_line() + geom_point() +
+  facet_wrap(~ n_ms, ncol = 4,
+             labeller = labeller(n_ms = function(x) paste0("n_ms = ", x)))
+```
+
+### 8. Visualizing both n_split and n_merge
+
+Results get consistently worse with higher n_merge, while n_split shows mostly inconclusive effects.
+
+```{r}
+results.l %>%
+  filter(para == "ari") %>%
+  group_by(method, n_split, n_ms, n_merge) %>%
+  summarise(mean_ari = mean(value), .groups = "drop") %>%
+  ggplot(aes(x = n_merge, y = mean_ari, color = method)) +
+  geom_line() + geom_point() +
+  facet_wrap(n_split ~ n_ms,
+             labeller = labeller(
+               n_split = function(x) paste0("n_split = ", x),
+               n_ms = function(x) paste0("n_ms = ", x)
+             ))
+
+results.l %>%
+  filter(para == "ari") %>%
+  group_by(method, n_split, n_ms, n_merge) %>%
+  summarise(mean_ari = mean(value), .groups = "drop") %>%
+  ggplot(aes(x = n_split, y = mean_ari, color = method)) +
+  geom_line() + geom_point() +
+  facet_wrap(n_merge ~ n_ms,
+             labeller = labeller(
+               n_merge = function(x) paste0("n_merge = ", x),
+               n_ms = function(x) paste0("n_ms = ", x)
+             ))
+```
+

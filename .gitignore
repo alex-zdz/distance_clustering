@@ -18,3 +18,9 @@ desktop.ini
 test/
 
 results/
+
+# Ignore everything in notebooks/
+notebooks/*
+
+# But keep .qmd files
+!notebooks/*.qmd

@@ -200,7 +200,11 @@ mixture_posterior <- function(c_alloc, data, prior_list) {
   )
 }
 
-
+fulfill_gap_label <- function(c_vec) {
+  unique_labels <- sort(unique(c_vec))
+  relabeled_vec <- match(c_vec, unique_labels)
+  return(relabeled_vec)
+}
 
 # Initialization Phase of the Algorithm
 initialize_clustering <- function(data,

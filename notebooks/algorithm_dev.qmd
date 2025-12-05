@@ -897,5 +897,17 @@ adj.rand.index(cluster_true, results$clustering)
 
 
 ```
+```{python}
+
+alex = [1,2,3]
+
+
+
+```
+    
+    
+    
+    
+    
     
     

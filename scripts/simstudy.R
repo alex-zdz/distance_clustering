@@ -3,7 +3,7 @@
 #Create grid:
 # Define parameter grids
 method_vals   <- c("KS", "Pearson", "W2")
-n_runs_vals   <- c(1, 3)         # small to moderate c(1, 10, 100) 
+n_runs_vals   <- c(1, 3, 5)         # small to moderate c(1, 10, 100) 
 n_sweet_vals  <- c(1, 5, 10)    # short vs. longer sweeps
 n_ms_vals <- c(1, 5, 10)         # max local moves
 n_merge_vals  <- c(1, 10)         
@@ -25,8 +25,8 @@ param_grid <- expand.grid(
 
 current_date <- format(Sys.Date(), "%d%m%Y")
 # Save the grid
-dir.create(paste0("results/simstudy/", current_date), showWarnings = FALSE, recursive = TRUE)
-saveRDS(param_grid, paste0("results/simstudy/", current_date,"/grid.rds"))
+dir.create(paste0("results/simstudy/", current_date,"/grid/"), showWarnings = FALSE, recursive = TRUE)
+saveRDS(param_grid, paste0("results/simstudy/", current_date,"/grid/grid.rds"))
 
 # if(FALSE){
 #   run = 1
@@ -151,21 +151,21 @@ grid_eval <- function(run, param_grid){
       n_split           = n_split
     )
   }, error = function(e) {
-    err_clustering <- conditionMessage(e)
+    err_clustering <<- conditionMessage(e)
     NULL
   })
   
   elapsed_sec <- as.numeric(Sys.time() - startt, units = "secs")
   
   # Compute Adjusted Rand Index safely
-  adj_rand <- tryCatch({
+  ari <- tryCatch({
     if (!is.null(results) && !is.null(results$clustering)) {
       adj.rand.index(cluster_true, results$clustering)
     } else {
       NA_real_
     }
   }, error = function(e) {
-    err_adj_rand <- conditionMessage(e)
+    err_ari <<- conditionMessage(e)
     NA_real_
   })
   
@@ -175,9 +175,9 @@ grid_eval <- function(run, param_grid){
   df_out <- data.frame(
     run              = run,
     time_sec         = elapsed_sec,
-    adj_rand         = adj_rand,
+    ari         = ari,
     err_clustering   = err_clustering,
-    err_adj_rand     = err_ari,
+    err_ari     = err_ari,
     stringsAsFactors = FALSE
   )
   

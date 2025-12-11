@@ -1,91 +1,91 @@
-#' Generate Mixture Model Data
-#'
-#' Generates synthetic data from a mixture model (Gaussian or skew-Gaussian).
-#' Component weights are sampled from a Dirichlet distribution via normalized gamma draws.
-#'
-#' @param N Integer. Number of observations to generate.
-#' @param K Integer. Number of mixture components. Default = 3.
-#' @param type Character. Type of mixture distribution:
-#'   - `"Gaussian"` (default)
-#'   - `"Skew Gaussian"`
-#'   - `"Skew-symmetric"` (not yet implemented).
-#' @param alpha Numeric. Concentration parameter for the Dirichlet prior on weights.
-#' @param means Numeric vector of length \code{K}. Component means. 
-#'   Defaults to \code{seq(-2, 2, length.out = K)} if not provided.
-#' @param sds Numeric vector of length \code{K}. Component standard deviations. 
-#'   Defaults to \code{rep(1, K)} if not provided.
-#' @param skews Numeric vector of length \code{K}. Component skewness parameters (only used for skew-Gaussian).
-#'   Defaults to \code{rep(0, K)} if not provided.
-#'
-#' @return A list with three elements:
-#'   \item{data}{Numeric vector of simulated values.}
-#'   \item{cluster_true}{Integer vector of true cluster allocations.}
-#'   \item{weights_true}{Numeric vector of true component weights.}
-#'
-#' @examples
-#' set.seed(123)
-#' sim <- generate_mixture_data(N = 200, K = 3, type = "Gaussian", alpha = 5)
-#' hist(sim$data, breaks = 30)
-#' table(sim$cluster_true)
-#'
-#' @export
+
 generate_mixture_data <- function(
     N,
     K = 3,
-    type = "Gaussian",
+    dim = 1,
     alpha = 1,
-    means = NULL,
-    sds = NULL,
-    skews = NULL
+    mu_true = NULL,      # vector for dim = 1, matrix (K x dim) for dim > 1
+    Sigma_true = NULL         # vector for dim = 1, list of covariance matrices for dim > 1
 ) {
-  #--- Generate component weights from Dirichlet ---
+  #--- Component weights from Dirichlet(alpha,...,alpha) ---
   gamma_draws <- rgamma(K, shape = alpha, rate = 1)
   weights_true <- gamma_draws / sum(gamma_draws)
   
   #--- Assign clusters ---
   cluster_true <- sample(1:K, N, replace = TRUE, prob = weights_true)
   
-  #--- Set default parameters if not provided ---
-  if (is.null(means)) means <- seq(-K, K, length.out = K)
-  if (is.null(sds)) sds <- rep(1, K)
-  if (type %in% c("Skew Gaussian", "Skew-symmetric") & is.null(skews)) skews <- rep(0, K)
-  
-  #--- Initialize data vector ---
-  y <- numeric(N)
-  
-  #--- Generate data based on type ---
-  if (type == "Gaussian") {
-    for (i in 1:K) {
-      idx <- cluster_true == i
-      y[idx] <- rnorm(sum(idx), mean = means[i], sd = sds[i])
-    }
-    
-  } else if (type == "Skew Gaussian") {
-    if (!requireNamespace("sn", quietly = TRUE)) {
-      stop("Package 'sn' is required for skew-normal generation. Install it via install.packages('sn').")
-    }
-    for (i in 1:K) {
-      idx <- cluster_true == i
-      y[idx] <- sn::rsn(sum(idx), xi = means[i], omega = sds[i], alpha = skews[i])
-    }
-    
-  } else if (type == "Skew-symmetric") {
-    stop("Skew-symmetric mixture not implemented in general form yet.")
-    
+  #--- Default mu_true ---
+  if (dim == 1) {
+    if (is.null(mu_true)) mu_true <- seq(-K, K, length.out = K)
   } else {
-    stop("Unknown mixture type. Choose 'Gaussian', 'Skew Gaussian', or 'Skew-symmetric'.")
+    if (is.null(mu_true)) {
+      mu_true <- matrix(0, nrow = K, ncol = dim)
+      for (i in 1:K) mu_true[i, ] <- rep(i, dim)  # simple separated defaults, consider making random
+    }
   }
   
-  return(list(data = y, cluster_true = cluster_true, weights_true = weights_true))
+  #--- Default covariances ---
+  if (dim == 1) {
+    if (is.null(Sigma_true)) Sigma_true <- rep(1, K)
+  } else {
+    if (is.null(Sigma_true)) {
+      Sigma_true <- vector("list", K)
+      for (i in 1:K) Sigma_true[[i]] <- diag(dim)      # identity covariance
+    }
+  }
+  
+  #--- Initialize data ---
+  y <- matrix(NA, nrow = N, ncol = dim)
+  
+  #--- Generate Gaussian data ---
+  for (i in 1:K) {
+    idx <- cluster_true == i
+    ni  <- sum(idx)
+    
+    if (ni > 0) {
+      if (dim == 1) {
+        y[idx, ] <- rnorm(ni, mean = mu_true[i], sd = Sigma_true[i])
+      } else {
+        y[idx, ] <- MASS::mvrnorm(n = ni, mu = mu_true[i, ], Sigma = Sigma_true[[i]])
+      }
+    }
+  }
+  
+  #--- Return vector for 1d case ---
+  if (dim == 1) y <- as.numeric(y)
+  
+  return(list(
+    data = y,
+    cluster_true = cluster_true,
+    weights_true = weights_true,
+    mu_true = mu_true,
+    Sigma_true = Sigma_true
+  ))
 }
 
 
 
 #Mixture_normal_cdf = function(x,w,u,s) sum( w*pnorm(x,mean=u,sd=sqrt(s)) )
-mixture_cdf <- function(x, weight, mean, sig2) sapply(x, function(xi) sum(weight * pnorm(xi, mean = mean, sd = sqrt(sig2))))
+mixture_cdf_1D <- function(x, weight, mean, sig2) sapply(x, function(xi) sum(weight * pnorm(xi, mean = mean, sd = sqrt(sig2))))
+
+mixture_pdf_1D <- function(t, mean, sig2, weight) {
+  mix_pdf <-   sapply(t, function(xi) sum(weight * dnorm(xi, mean = mean, sd = sqrt(sig2))))
+  mix_pdf / sum(mix_pdf)
+}
+
+emp_pdf <- function(t, proj) {
+  # Create histogram with length(t) bins over range of t
+  h <- hist(proj,
+            breaks = seq(min(t), max(t), length.out = length(t) + 1),
+            plot = FALSE)
+  
+  density <- h$counts
+  # Normalize
+  density / sum(density)
+}
 
 KS_mixture_distance <- function(data, weight, mean, sig2) {
-  as.numeric(ks.test(data, mixture_cdf, weight, mean, sig2)$statistic)
+  as.numeric(ks.test(data, mixture_cdf_1D, weight, mean, sig2)$statistic)
 }
 
 # Pearson distance new:
@@ -100,7 +100,7 @@ Pearson_mixture_distance <- function(data, weight, mean, sig2) {
   gg <- bin_counts / n
   
   # mixture bin probabilities
-  cdf_vals <- mixture_cdf(bins, weight, mean, sig2)  # vectorized
+  cdf_vals <- mixture_cdf_1D(bins, weight, mean, sig2)  # vectorized
   ff <- numeric(n_bins)
   ff[1] <- cdf_vals[1]
   ff[2:(n_bins-1)] <- diff(cdf_vals)
@@ -115,32 +115,70 @@ Pearson_mixture_distance <- function(data, weight, mean, sig2) {
 
 
 
-#' Compute Distance Between Data and Mixture
-#'
-#' Wrapper function for computing distances between observed data and a Gaussian mixture.
-#' Currently supports the Kolmogorov–Smirnov (KS) distance.
-#'
-#' @param data Numeric vector. Observed data.
-#' @param w Numeric vector of component weights.
-#' @param mean Numeric vector of component means.
-#' @param sig2 Numeric vector of component variances.
-#' @param method Character. Distance method to use. Currently only `"KS"` is implemented.
-#'
-#' @return Numeric scalar. Distance value.
-#'
-#' @examples
-#' set.seed(123)
-#' data <- rnorm(100)
-#' compute_distance(data, w = c(0.5, 0.5), mean = c(0, 2), sig2 = c(1, 1), method = "KS")
-#'
-#' @export
-compute_distance <- function(data, weight, mean, sig2, method = "KS") {
+# Compute Distance Between Data and Mixture
+
+compute_distance <- function(data, weight, mean, Sigma, method = "KS") {
+  
+  if (is.null(dim(data))) {
+    D <- 1
+  } else {
+    D <- ncol(data)
+  }
+  
+  if(D != 1 & method != "Wasserstein"){
+    stop("only Sliced Wasserstein for higher dimensions")
+  }
+  
+  K = length(weight)
+  
   if (method == "KS") {
-    KS_mixture_distance(data, weight, mean, sig2)
-  }else if (method == "W2") {
-    W2(data, weight, mean, sig2)
+    KS_mixture_distance(data, weight, mean, Sigma)
+  }else if (method == "Wasserstein") {
+    # for now always p = 2, consider adapting
+    M = 2e3
+    t <- seq(
+      from = -max(abs(y)) * sqrt(2 * D),
+      to   =  max(abs(y)) * sqrt(2 * D),
+      length.out = M
+    )
+    
+    if(D == 1){
+      
+      I0 = mixture_pdf(t, mean, Sigma, weight)
+      I1 = emp_pdf(t, data)
+      Wasserstein_1D(I0, I1, p = 2)
+      
+    }else{ # Sliced Wasserstein
+      
+      L = 20 # for now fixed to low number
+      
+      theta = generateTheta(L, D)
+      yproj = y %*% t(theta)
+      
+      projected_Sigma <- matrix(0, nrow = K, ncol = L)
+      projected_Mu    <- matrix(0, nrow = K, ncol = L)
+      
+      for (k in 1:K) {
+        for (l in 1:L) {
+          projected_Sigma[k, l] <- sqrt( theta[l, , drop = FALSE] %*% Sigma[[k]] %*% t(theta[l, , drop = FALSE]) )
+          projected_Mu[k, l]    <- theta[l, , drop = FALSE] %*% mean[[k]]
+        }
+      }
+      
+      SW = 0
+      
+      for (l in 1:L){
+        RIx = mixture_pdf(t, projectedMu[,l], projectedSigma[,l], weights)
+        RIy = emp_pdf(t, yproj[,l])
+        SW = SW + pWasserstein(RIx, RIy,p=2) / L
+      }
+      
+      SW
+      
+    }
+    
   } else if (method == "Pearson") {
-    Pearson_mixture_distance(data, weight, mean, sig2)
+    Pearson_mixture_distance(data, weight, mean, Sigma)
   } else {
     stop("Unknown distance method")
   }
@@ -157,48 +195,174 @@ prepare_AM_posterior_params <- function(mix_post_draws) {
 
 # Calculate the posterior expectations of a mixture model conditional on the chosen clustering
 mixture_posterior <- function(c_alloc, data, prior_list) {
+  
   # Extract priors
   alpha_0 <- prior_list$alpha_0
   kappa_0 <- prior_list$kappa_0
   mu_0    <- prior_list$mu_0
-  a_0     <- prior_list$a_0
-  b_0     <- prior_list$b_0
   
-  # Number of clusters (assumed labeled 1...K)
-  K <- max(c_alloc)
+  n <- nrow(data)
+  D <- ncol(data)
+  K <- max(c_alloc) # Number of clusters (assumed labeled 1...K)
   
-  # Preallocate
-  alpha_post  <- numeric(K)
-  mu_post     <- numeric(K)
-  sigma2_post <- numeric(K)
+  # Allocate storage
+  alpha_post <- numeric(K)
+  mu_post <- vector("list", K)
+  Sigma_post <- vector("list", K)   # D>1: covariance matrices. D=1: sigma2.
   
-  for (k in seq_len(K)) {
-    y_k <- data[c_alloc == k]
-    n_k <- length(y_k)
+  # ---------------------------------------------------------------------
+  # CASE 1: UNIVARIATE (D = 1): Normal–Inverse-Gamma
+  # ---------------------------------------------------------------------
+  if (D == 1) {
     
-    # Posterior for weights
-    alpha_post[k] <- alpha_0 + n_k
+    a_0     <- prior_list$a_0
+    b_0     <- prior_list$b_0
     
-    # Posterior for mean
-    kappa_post <- kappa_0 + n_k
-    mu_post[k] <- (kappa_0 * mu_0 + sum(y_k)) / kappa_post
-    
-    # Posterior for variance (# Old code was using mean(y_k) instead of mu_post[k])
-    a_post <- a_0 + 0.5 * (n_k + 1)  # "+1" accounts for mean uncertainty
-    b_post <- b_0 + 0.5 * sum((y_k - mu_post[k])^2) +
-      0.5 * kappa_0 * (mu_post[k] - mu_0)^2
-    
-    sigma2_post[k] <- b_post / (a_post - 1)  # posterior mean of Inv-Gamma
-  }
+    for (k in seq_len(K)) {
+      y_k <- data[c_alloc == k]
+      n_k <- length(y_k)
+      
+      # Posterior for weights
+      alpha_post[k] <- alpha_0 + n_k
+      
+      ybar <- mean(y_k)
+      S <- sum((y_k - ybar)^2)    # within-cluster sum of squares
+      
+      # posterior hyperparams
+      kappa_post <- kappa_0 + n_k
+      mu_n    <- (kappa_0 * mu_0 + n_k * ybar) / kappa_post
+      a_post     <- a_0 + 0.5 * n_k
+      b_post     <- b_0 + 0.5 * S + (kappa_0 * n_k) / (2 * kappa_post) * (ybar - mu_0)^2
+      
+      # sample variance then mean
+      Sigma_post[[k]] <- 1 / rgamma(1, shape = a_post, rate = b_post)    # Inv-Gamma sample
+      mu_post[[k]] <- rnorm(1, mean = mu_n, sd = sqrt(Sigma_post[[k]] / kappa_post))
+      
+    }
   
-  weights_post <- alpha_post / sum(alpha_post)  # expected Dirichlet
+    # ---------------------------------------------------------------------
+    # CASE 2: MULTIVARIATE (D > 1): Normal–Inverse-Wishart
+    # ---------------------------------------------------------------------
+    } else {
+      
+      nu_0 <- prior_list$nu_0
+      S_0  <- prior_list$S_0
+      
+      for (k in seq_len(K)) {
+        y_k <- data[c_alloc == k, , drop = FALSE]
+        n_k <- nrow(y_k)
+        
+        # Posterior for weights
+        alpha_post[k] <- alpha_0[k] + n_k
+        
+        # Means
+        y_bar <- colMeans(y_k)
+        diff <- sweep(y_k, 2, y_bar)
+        S_k_data <- t(diff) %*% diff
+        
+        # Posterior mean of the mean
+        kappa_post <- kappa_0 + n_k
+        mu_post_k <- (kappa_0 * mu_0 + n_k * y_bar) / kappa_post
+        
+        nu_post <- nu_0 + n_k
+        cross_term <- (kappa_0 * n_k / kappa_post) * tcrossprod(y_bar - mu_0) 
+        S_k_post <- S_0 + S_data + cross_term
+        
+        # sample Sigma (Inv-Wishart) then mu | Sigma
+        Sigma_post[[k]] <- MCMCpack::riwish(nu_post, S_k_post)
+        mu_post[[k]] <- MASS::mvrnorm(1, mu_post_k, Sigma / kappa_post)
+      }
+    } 
+    
+  weights_post <- as.numeric(MCMCpack::rdirichlet(1, alpha_post))
   
   list(
     weights_post   = weights_post,
     mu_post   = mu_post,
-    sigma2_post = sigma2_post
+    Sigma_post = Sigma_post
   )
 }
+
+
+
+#####################
+# Sliced Wasserstein
+#####################
+
+generateTheta <- function(L, d) {
+  theta <- matrix(0, nrow = L, ncol = d)
+  
+  # First vector: uniform on sphere
+  th_l <- runif(d)
+  th_l <- th_l / sqrt(sum(th_l^2))
+  theta[1, ] <- th_l
+  
+  # Remaining vectors
+  for (i in 2:L) {
+    th_l <- rnorm(d)
+    th_l <- th_l / sqrt(sum(th_l^2))
+    
+    m <- max(abs(theta[1:(i - 1), ] %*% th_l))
+    
+    while (m > 0.97) {
+      th_l <- rnorm(d)
+      th_l <- th_l / sqrt(sum(th_l^2))
+      m <- max(abs(theta[1:(i - 1), ] %*% th_l))
+    }
+    theta[i, ] <- th_l
+  }
+  theta
+}
+
+Wasserstein_1D <- function(I0, I1, p = 2) {
+  stopifnot(length(I0) == length(I1))
+  
+  eps <- 1e-7
+  
+  # Ensure strict positivity
+  I0 <- I0 + eps
+  I1 <- I1 + eps
+  
+  # Normalize to sum to 1 - both pdfs have already been normalized, so this step is redundant here
+  I0 <- I0 / sum(I0)
+  I1 <- I1 / sum(I1)
+  
+  # Compute CDFs
+  J0 <- cumsum(I0)
+  J1 <- cumsum(I1)
+  
+  # Grid
+  x       <- seq_along(I0) - 1
+  xtilde  <- seq(0, 1, length.out = length(I0))
+  
+  # Inverse CDF sampling (pseudo-quantiles)
+  XI0 <- approx(J0, x, xout = xtilde, rule = 2)$y
+  XI1 <- approx(J1, x, xout = xtilde, rule = 2)$y
+  
+  # Displacement field u(x)
+  u <- approx(XI0, XI0 - XI1, xout = x, rule = 2)$y
+  
+  # # Transport map f(x) = x - u(x)
+  # f <- x - u
+  # 
+  # # Potential phi(x)
+  # phi <- cumsum(u / length(I0))
+  # phi <- phi - mean(phi)
+  
+  # p-Wasserstein distance
+  Wp <- (mean((abs(u)^p) * I0))^(1/p)
+  
+  Wp
+}
+
+
+
+
+########
+# Search Algorithm
+########
+
+
 
 fulfill_gap_label <- function(c_vec) {
   unique_labels <- sort(unique(c_vec))

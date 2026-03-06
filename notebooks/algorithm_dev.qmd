@@ -1217,22 +1217,15 @@ Continue here by adapting AntMAN for higher dimensions.
 # -----------------------------
 N <- 100
 K <- 3
+D = 2
 alpha_0 <- 1
 
-# simdata <- generate_mixture_data(
-#   N,
-#   K = K,
-#   type = "Gaussian",
-#   alpha = alpha_0,
-#   means = NULL,
-#   sds = NULL,
-#   skews = NULL
-# )
-
+set.seed(2)
+  
 simdata <- generate_mixture_data(
     N,
     K,
-    dim = 3,
+    dim = D,
     alpha = alpha_0,
     mu_true = NULL,      
     Sigma_true = NULL 
@@ -1247,23 +1240,23 @@ Sigma_true <- simdata$Sigma_true
 # Prior hyperparameters
 # -----------------------------
 alpha <- 1
-kappa_0 <- 1
-sig2_0 <- 1
-mu_0 <- 0
-nu_0 <- 1
+kappa_0 <- 0.1
+Lam_0 <- diag(D) 
+mu_0 <- rep(0, D)
+nu_0 <- D + 2
 
 # -----------------------------
 # MCMC settings
 # -----------------------------
-n_iter <- 2e4
+n_iter <- 2e3
 burn_in <- n_iter / 4
 thin <- 10
 
 # -----------------------------
 # Define ANTMAN priors & parameters
 # -----------------------------
-mixture_uvn_params <- AntMAN::AM_mix_hyperparams_uninorm(
-  m0 = mu_0, k0 = kappa_0, nu0 = nu_0, sig02 = sig2_0
+mixture_mvn_params <- AntMAN::AM_mix_hyperparams_multinorm(
+ mu0 = mu_0, ka0 = kappa_0, nu0 = nu_0, Lam0 = Lam_0
 )
 
 mcmc_params <- AntMAN::AM_mcmc_parameters(
@@ -1279,7 +1272,7 @@ components_prior <- AntMAN::AM_mix_components_prior_pois(Lambda = K)
 # -----------------------------
 mix_post_draws <- AntMAN::AM_mcmc_fit(
   y = y,
-  mix_kernel_hyperparams = mixture_uvn_params,
+  mix_kernel_hyperparams = mixture_mvn_params,
   mix_components_prior = components_prior,
   # mix_weight_prior = weights_prior,
   mcmc_parameters = mcmc_params
@@ -1287,37 +1280,90 @@ mix_post_draws <- AntMAN::AM_mcmc_fit(
 
 eam <- AM_clustering(mix_post_draws)  # M*n matrix
 
+c_salso_vi <- salso(eam, loss = VI())
+
+c_salso_binder <- salso(eam, loss = binder())
+
+plot(y, col = cluster_true)
+plot(y, col = c_salso_binder)
+
 ```
 
 ```{r}
-
 # Example prior list for a univariate Gaussian mixture
-prior_list <- list(
-  alpha_0 = 1,       # Dirichlet concentration for mixture weights
-  kappa_0 = 1,    # pseudo-count for mean prior
-  mu_0    = 0,       # prior mean for component means
-  a_0     = 2,       # shape parameter for inverse-gamma prior on variance
-  b_0     = 1        # scale parameter for inverse-gamma prior on variance
-)
+er
+```
 
-# Prepare the AM output for the function
-posterior_params <- list(
-  weight = lapply(mix_post_draws$W, unlist),
-  mu_post = lapply(mix_post_draws$mu, unlist),
-  sigma2_post = lapply(mix_post_draws$sig2, unlist)
-)
+#### Test the initialization result:
 
-clustering_matrix <- eam + 1
+```{r}
 
+posterior_params <- prepare_AM_posterior_params(posterior_draws)
+
+# init_res <- initialize_clustering(
+#       data              = data,
+#       clustering_matrix = clustering_matrix,   # list of candidate clusterings
+#       posterior_params  = posterior_params,
+#       method            = "Wasserstein"
+#     )
+
+n_candidates <- nrow(clustering_matrix)
+distance <- numeric(n_candidates)
+
+D <- ncol(data)
+
+# Continue later: if prepare params function is in place, unify naming for uv and mv case to avoid later distinction:
+# therefore sigma is always called sig2_post, even in the mv case, or better var_post?
+
+for (i in seq_len(n_candidates)) {
+print(i)
+  if (!is.null(posterior_params)) {
+    # use given posterior parameters
+    w_i    <- posterior_params$weight_post[[i]]
+    mu_i   <- posterior_params$mu_post[[i]]
+    var_i <- posterior_params$var_post[[i]]
+    
+   # w_i; mu_i;var_i
+  } else {
+    # compute posterior parameters from clustering
+    c_i <- clustering_matrix[i, ]
+    param_post <- mixture_posterior(c_i, data, prior_list)
+    w_i    <- param_post$weights_post
+    mu_i   <- param_post$mu_post
+    var_i <- param_post$var_post
+  }
+  
+  distance[i] <- compute_distance(data, w_i, mu_i, var_i, method)
+  #print(paste0(distance[i]))
+}
+
+best_index <- which.min(distance)
+D_current <- distance[best_index]
+c_current <- clustering_matrix[best_index,]
+
+c_salso_binder <- salso(clustering_matrix, loss = binder(), maxZealousAttempts = 0)
+
+par(mfrow=c(2, 1))
+plot(y, col = c_salso_binder)
+plot(y, col = c_current)
+
+```
+
+
+
+
+
+
+```{r}
 results <- run_clustering(data = y,
                clustering_matrix = clustering_matrix,
-               posterior_draws,   
+               posterior_params = mix_post_draws,   
                prior_list,
-               method         = "KS",
-               n_runs         = 10,
-               max_sweet_iter = 100,
+               method         = "Wasserstein",
+               n_runs         = 1,
+               n_sweet = 1,
                tol            = 1e-10,
-               n_max          = 1,
+               n_ms          = 1,
                n_merge        = 1,
                n_split        = 1)
 

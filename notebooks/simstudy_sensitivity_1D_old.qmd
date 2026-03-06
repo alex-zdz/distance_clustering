@@ -1,0 +1,647 @@
+---
+title: "Simulation study and sensitivity analysis of the inidvidual parts in 1D"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+# Setup, load and source
+
+```{r setup}
+# Load necessary libraries
+library(AntMAN)
+library(salso)
+library(tidyverse)
+library(Rcpp)
+library(RcppArmadillo)
+library(fossil)
+library(dplyr)
+library(mclust)  # for adjustedRandIndex
+
+library(tidyr)
+library(ggplot2)
+
+getwd()
+source("src/mixture_utils.R")
+
+```
+
+### general setup
+
+```{r}
+
+n_replication <- 1
+
+for(i in 1:n_replication){
+  
+  set.seed(i)
+  
+  N <- 200
+  K <- 3
+  alpha_0 <- 1
+  
+  simdata <- generate_mixture_data(
+      N,
+      K,
+      dim = 1,
+      alpha = alpha_0,
+      mu_true = NULL,      
+      Sigma_true = NULL 
+  )
+  
+  y <- simdata$data
+  cluster_true <- simdata$cluster_true
+  weights_true <- simdata$weights_true
+  
+  # -----------------------------
+  # Prior hyperparameters
+  # -----------------------------
+  # invgamma mean is beta / alpha -1
+  # to accomodate mean values of -K to K, lets say for K = 3 around a prior mean of the mean of 0 we need
+  # an sd close to K. Therefore b / a - 1 = K. The variance is  
+  
+  alpha_0 <- 1
+  kappa_0 <- 0.1
+  nu_0 <- 3 # alpha of the invgamma prior
+  sig2_0 <- 2 # beta of the inverse-gamma prior
+  mu_0 <- 0 # prior mean of the mean
+  
+  
+  # Constellation from XJs simulation
+  # alpha = 1
+  # kappa_0 = 0.01
+  # mu_0 = 0
+  # nu_0 = 2
+  # sig2_0 = 5
+  
+  prior_list <- list(
+    alpha_0 = 1,       # Dirichlet concentration for mixture weights
+    kappa_0 = 1,   
+    mu_0    = 0,       # prior mean for component means
+    a_0     = 2,       # shape parameter for inverse-gamma prior on variance
+    b_0     = 1        # scale parameter for inverse-gamma prior on variance
+  )
+  # -----------------------------
+  # MCMC settings
+  # -----------------------------
+  n_iter <- 2e4
+  burn_in <- n_iter / 4
+  thin <- 10
+  
+  # -----------------------------
+  # Define ANTMAN priors & parameters
+  # -----------------------------
+  mixture_uvn_params <- AntMAN::AM_mix_hyperparams_uninorm(
+    m0 = mu_0, k0 = kappa_0, nu0 = nu_0, sig02 = sig2_0
+  )
+  
+  mcmc_params <- AntMAN::AM_mcmc_parameters(
+    niter = n_iter, burnin = burn_in, thin = thin, verbose = 1
+  )
+  
+  components_prior <- AntMAN::AM_mix_components_prior_pois(Lambda = K)
+  
+  # -----------------------------
+  # Run MCMC and cluster
+  # -----------------------------
+  mix_post_draws <- AntMAN::AM_mcmc_fit(
+    y = y,
+    mix_kernel_hyperparams = mixture_uvn_params,
+    mix_components_prior = components_prior,
+    mcmc_parameters = mcmc_params
+  )
+  
+  eam <- AM_clustering(mix_post_draws)  # M*n matrix
+  
+  clustering_matrix <- eam + 1
+  
+  res_KS <- run_clustering(data = y,
+                 clustering_matrix = clustering_matrix,
+                 posterior_draws = mix_post_draws,
+                 prior_list,
+                 method         = "KS",
+                 n_runs         = 1,
+                 n_sweet = 0,
+                 tol            = 1e-10,
+                 n_ms          = 10,
+                 n_merge        = 10,
+                 n_split        = 0)
+    
+    
+  
+}
+
+# plot(y, rep(0, N), col = cluster_true)
+# 
+# plot(y, rep(0, N), col = clustering_matrix[200,])
+# plot(y, rep(0, N), col = clustering_matrix[1000,])
+plot(y, rep(0, N), col = res_KS$clustering)
+
+# iter <- 200
+# cols <- clustering_matrix[iter, ]
+# ucl  <- paste0("cluster:", sort(unique(cols))," mean:", round(unlist(mix_post_draws$mu[[iter]]), 2), " var:", round(unlist(mix_post_draws$sig2[[iter]]), 2))
+# 
+# plot(y, rep(0, N), col = cols)
+# legend("topright",
+#        legend = ucl,
+#        col = sort(unique(cols)),
+#        pch = 1,
+#        title = "Cluster")
+
+
+```
+
+### Sensitivity of the distances to the number of clusters
+
+Quick comparison if the distance metrics prefer less or more clusters. Start by analyzing the binder results:
+
+#### Binder
+
+```{r}
+
+
+binder_loss <- apply(
+  clustering_matrix,
+  MARGIN = 1,
+  FUN = function(cl) binder(truth = cluster_true , estimate = cl)
+)
+
+par(mfrow = c(2, 1))
+plot(apply(clustering_matrix, 1, max), type = "l")
+plot(binder_loss, col = "red", type = "l")
+
+c_binder <- clustering_matrix[which.min(binder_loss),]
+
+```
+
+```{r}
+
+Kmax <- apply(clustering_matrix, 1, max)
+binder_summary <- aggregate(
+  binder_loss,
+  by = list(Kmax = Kmax),
+  FUN = function(x) c(mean = mean(x), var = var(x))
+)
+
+```
+
+Seems that the binder correctly favors 3 clusters and punishes solutions with more clusters.
+
+#### Distances
+
+What about our distances:
+
+```{r}
+
+methods <- c("KS", "Pearson", "Wasserstein")
+n_candidates <- nrow(clustering_matrix)
+
+# Precompute max cluster label for each clustering
+Kmax <- apply(clustering_matrix, 1, max)
+
+# Initialize a list to store distance vectors per method
+distance_list <- vector("list", length(methods))
+distance_list_cw <- vector("list", length(methods))
+names(distance_list) <- methods
+
+prior_list <- list(
+  alpha_0 = 1,       # Dirichlet concentration for mixture weights
+  kappa_0 = 1,   
+  mu_0    = 0,       # prior mean for component means
+  a_0     = 2,       # shape parameter for inverse-gamma prior on variance
+  b_0     = 1        # scale parameter for inverse-gamma prior on variance
+)
+
+# XJ prior list:
+prior_list <- list(
+  alpha_0 = 1,       # Dirichlet concentration for mixture weights
+  kappa_0 = 0.01,   
+  mu_0    = 0,       # prior mean for component means
+  a_0     = 2,       # shape parameter for inverse-gamma prior on variance
+  b_0     = 5        # scale parameter for inverse-gamma prior on variance
+)
+
+for (method in methods) {
+  distance <- numeric(n_candidates)
+  distance_cw <- numeric(n_candidates)
+  
+  for (i in seq_len(n_candidates)) {
+    c_i <- clustering_matrix[i, ]
+    param_post <- mixture_posterior(c_i, y, prior_list)
+    w_i <- param_post$weight_post
+    mu_i <- param_post$mu_post
+    var_i <- param_post$var_post
+    
+    distance[i] <- compute_distance(data, w_i, mu_i, var_i, method)
+    distance_cw[i] <- compute_distance(data, w_i, mu_i, var_i, method, clusterwise = TRUE, c_alloc = c_i)
+  }
+  
+  distance_list[[method]] <- distance
+  distance_list_cw[[method]] <- distance_cw
+}
+
+# Combine results into a data.frame for summarizing
+results_df <- do.call(rbind, lapply(methods, function(m) {
+  data.frame(
+    method = m,
+    Kmax = Kmax,
+    distance = distance_list[[m]],
+    cw = FALSE
+  )
+}))
+
+results_df_cw <- do.call(rbind, lapply(methods, function(m) {
+  data.frame(
+    method = m,
+    Kmax = Kmax,
+    distance = distance_list_cw[[m]],
+    cw = TRUE
+  )
+}))
+
+results_df <- rbind(results_df, results_df_cw)
+
+
+```
+
+
+```{r}
+
+summary_df <- results_df %>%
+  group_by(method, Kmax, cw) %>%
+  summarise(
+    mean_distance = mean(distance),
+    var_distance = var(distance),
+    .groups = "drop"
+  )
+
+
+summary_df %>% print(n = 21)
+
+summary_df %>% 
+  #filter(method != "Wasserstein") %>% 
+ggplot(aes(x = factor(Kmax), y = mean_distance, fill = factor(cw))) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  geom_errorbar(aes(
+    ymin = mean_distance - sqrt(var_distance),
+    ymax = mean_distance + sqrt(var_distance)
+  ), 
+  width = 0.2,
+  position = position_dodge(0.9)) +
+  facet_wrap(~method, scales = "free") + 
+  theme_minimal()
+
+```
+
+Old:
+It seems the distances do not pick up the right solutions, Wasserstein and KS even prefer a higher number of clusters! That would make sense since the density should be approximated better with a higher number of clusters.
+New: after changing the priors, the distances seem to work!
+
+
+Let's see if the preferred solutions are accurate, irrespective of the number of clusters:
+
+```{r}
+
+
+# Assume:
+# clustering_matrix: matrix with clusterings (rows = clusterings, cols = data points)
+# results_df: data frame with columns method, distance, and (added below) index
+# y: numeric vector (data)
+# cluster_true: true cluster labels vector (factor or integer)
+
+n_candidates <- nrow(clustering_matrix)
+results_df$index <- rep(1:n_candidates, times = length(unique(results_df$method)))
+
+# Step 1: Find best clustering index per method
+best_solutions <- results_df %>%
+  group_by(method, cw) %>%
+  slice_min(distance, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  dplyr::select(method, cw, best_index = index)
+
+
+# Step 2: Extract best clusterings
+best_clusterings <- lapply(best_solutions$best_index, function(idx) {
+  clustering_matrix[idx, ]
+})
+
+best_clusterings[[7]] <- c_binder
+
+names(best_clusterings) <- c(paste(
+  best_solutions$method,
+  best_solutions$cw,
+  sep = " | "
+), "binder")
+
+
+#Step 3: Prepare plotting data frame
+plot_df <- data.frame(
+  y = y,
+  true = factor(cluster_true)
+)
+
+for (nm in names(best_clusterings)) {
+  plot_df[[nm]] <- factor(best_clusterings[[nm]])
+}
+
+plot_long <- plot_df %>%
+  pivot_longer(
+    cols = -y,
+    names_to = "Clustering",
+    values_to = "Cluster"
+  )
+
+ggplot(plot_long, aes(x = y, y = 0, color = Cluster)) +
+  geom_point(size = 3, alpha = 0.7) +
+  facet_wrap(~ Clustering, ncol = 1) +
+  theme_minimal() +
+  theme(
+    axis.text.y  = element_blank(),
+    axis.ticks.y = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank()
+  ) +
+  labs(
+    x = "Data (y)",
+    y = "",
+    color = "Cluster",
+    title = "Comparison of Best Clusterings per Method and cw vs True Labels"
+  )
+
+
+
+
+```
+
+
+The distance methods are very sensitive to the prior choice!!
+
+# Adjusted Rand Index
+
+```{r}
+
+
+
+# Compute Rand Index and Adjusted Rand Index for each clustering
+results <- lapply(best_clusterings, function(clust) {
+  ari <- adjustedRandIndex(clust, cluster_true)
+})
+
+# Convert results to a data.frame for better readability
+results_df <- do.call(rbind, lapply(names(results), function(name) {
+  data.frame(
+    Solution = name,
+    Adjusted_Rand_Index = results[[name]]
+  )
+}))
+
+print(results_df)
+
+```
+
+```{r}
+
+
+# Rename 'Solution' to 'Clustering' to join with plot_long
+results_df2 <- results_df %>% 
+  rename(Clustering = Solution)
+
+# Join ARI to plot_long (just for completeness, though not strictly necessary for plotting)
+plot_long2 <- plot_long %>%
+  left_join(results_df2, by = "Clustering")
+
+# Create labels for ARI with rounded values
+labels_df <- results_df2 %>%
+  mutate(label_text = paste0("ARI: ", round(Adjusted_Rand_Index, 3)))
+
+# Get x and y positions to place text (e.g., max x and y=0.1)
+text_positions <- plot_long %>%
+  group_by(Clustering) %>%
+  summarise(x_pos = max(y), y_pos = 0.1, .groups = "drop")
+
+labels_df <- labels_df %>%
+  left_join(text_positions, by = "Clustering")
+
+# Plot with ARI annotations
+ggplot(plot_long2, aes(x = y, y = 0, color = Cluster)) +
+  geom_point(size = 3, alpha = 0.7) +
+  geom_text(
+    data = labels_df,
+    aes(x = x_pos, y = y_pos, label = label_text),
+    inherit.aes = FALSE,
+    hjust = 1,
+    #vjust = 0.1,
+    size = 4,
+    color = "black"
+  ) +
+  facet_wrap(~ Clustering, ncol = 1) +
+  theme_minimal() +
+  theme(
+    axis.text.y  = element_blank(),
+    axis.ticks.y = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank()
+  ) +
+  labs(
+    x = "Data (y)",
+    y = "",
+    color = "Cluster",
+    title = "Comparison of Best Clusterings per Method and cw vs True Labels"
+  )
+
+```
+
+
+
+
+### XJs method:
+
+KS:
+
+```{r}
+
+Mixture_normal_cdf = function(x,w,u,s) sum( w*pnorm(x,mean=u,sd=s) )
+
+mixture_posterior <- function(c_alloc, data, prior_list){
+  # prior
+  alpha = prior_list$alpha
+  kappa0 = prior_list$kappa0
+  theta = prior_list$theta
+  a = prior_list$a
+  b = prior_list$b
+  
+  
+  cluster=sort(unique(c_alloc))
+  K = length(cluster)
+  N = length(data)
+  data_ordered = sort(data)
+  
+  alpha_post = numeric(K)
+  mu_post = numeric(K)
+  sigma2_post = numeric(K)
+  
+  # posterior mean
+  for (k in 1:K) {
+    I = c_alloc==cluster[k]
+    nk=sum(I)
+    yk=data[I]
+    alpha_post[k]=alpha+sum(c_alloc==cluster[k])
+    kappa_post = kappa0 +nk
+    mu_post[k] = (kappa0 * theta + sum(yk))/kappa_post
+    a_post = a + (nk + 1) * 0.5 # if mean depends on sigma^2, need to add 1!
+    b_post = b + 0.5 * sum((yk-mean(yk))^2) + 0.5*kappa0*nk*(mean(yk)-theta)^2/kappa_post
+    sigma2_post[k] = b_post/(a_post -1) 
+  }
+  weights= alpha_post/sum(alpha_post)   
+  
+  posterior_list = list("weights"=weights, "mu_post"=mu_post, "sigma2_post"=sigma2_post)
+  return(posterior_list)
+}
+
+
+KS_distance_mixture <- function(observed_data, c_alloc, prior_list){
+  
+  posterior_list = mixture_posterior(c_alloc, observed_data, prior_list)
+  w = posterior_list$weights
+  u = posterior_list$mu_post
+  s = posterior_list$sigma2_post
+  
+  ecdf_func <- function(data) { 
+    Length <- length(data) 
+    sorted <- sort(data) 
+    ecdf <- rep(0, Length) 
+    for (i in 1:n) { 
+      ecdf[i] <- sum(sorted <= data[i]) / Length 
+    } 
+    return(ecdf) 
+  } 
+  
+  n = length(observed_data)
+  FN = ecdf_func(observed_data)
+  FN_sort = sort(FN)
+  knots_vec = sort(observed_data)
+  distance_vec = numeric(n-1)
+  distance_vec[1] = abs(Mixture_normal_cdf(knots_vec[1], w, u, s) - FN_sort[1])
+  for(i in 2:n){
+    x_i = knots_vec[i-1]
+    x_i_next = knots_vec[i]
+    d1 = abs(Mixture_normal_cdf(x_i,w, u, s) - FN_sort[i])
+    d2 = abs(Mixture_normal_cdf(x_i_next,w, u, s) - FN_sort[i])
+    distance_vec[i] = max(d1, d2)
+  }
+  KS = max(distance_vec)
+  return(KS)
+}
+
+
+
+
+
+```
+
+```{r}
+
+Initialization_phase <- function(c_sample, observed_data, prior_list, distance_function){
+  # Input: mat I_mcmc*n c_sample
+  #        double [0,1] p_sa: the probability to sequential allocation
+  #        int k_d: the number of maximum clusters
+  # print("Start Initialization Phase")
+  result = min_distance(c_sample, observed_data, prior_list,distance_function) + 1
+  # print("End Initialization Phase")
+  return(result)
+}
+
+min_distance <- function(c_samples, data, prior_list, distance_function){
+  # c_samples: M*n matrix
+  M = dim(c_samples)[1]
+  result_vec = numeric(M)
+  for (i in 1:M) {
+    if(i%%100==0){
+      print(i)
+    }
+    result_vec[i] = distance_function(data, c_samples[i,], prior_list)
+  }
+  min_m = which(result_vec==min(result_vec))[1]
+  # print(min_m)
+  return(c_samples[min_m,])
+}
+
+```
+
+```{r}
+
+alpha = 1
+kappa0 = 0.01
+theta = 0
+a = 2
+b = 5
+prior_list = list("alpha"=alpha, "kappa0"=kappa0, "theta"=theta, "a"=a, "b"=b)
+data = y
+c_samples = clustering_matrix
+
+M = dim(c_samples)[1]
+result_vec = numeric(M)
+for (i in 1:M) {
+  if(i%%100==0){
+    print(i)
+  }
+  result_vec[i] = KS_distance_mixture(data, c_samples[i,], prior_list)
+}
+min_m = which(result_vec==min(result_vec))[1]
+
+
+
+```
+
+Add it to the rest:
+
+```{r}
+
+#results_df_all <- cbind(rbind(results_df, data.frame(method = "KS_XJ", Kmax = 99, distance = result_vec, index = 1:M)), binder_loss =rep(binder_loss, 4))
+
+results_df_all <- cbind(results_df, binder_loss =rep(binder_loss, 3))
+
+results_df_all %>% 
+ggplot(aes(x = binder_loss, y = distance, col = cw)) +
+  geom_point(alpha = 0.6) +
+  facet_wrap(~ method, scales = "free", ncol = 2) +
+  labs(
+    x = "Binder Loss",
+    y = "Distance",
+    title = "Scatterplot of Distance vs Binder Loss by Method"
+  ) +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"))
+
+```
+
+We can see that except for the Pearson distance, the density based distances have a positive correlation with the binder loss and now give sensible results (see point plot).
+
+We can also see that the cw methods always result in a higher distance than their non-cw alternatives. Would about their accuracy?
+
+```{r}
+
+wide_df <- results_df_all %>%
+  select(method, index, cw, distance) %>%  # replace `value` with actual column to compare
+  pivot_wider(names_from = cw, values_from = distance,names_prefix = "cw_") 
+
+
+
+ggplot(wide_df, aes(x = cw_FALSE, y = cw_TRUE)) +
+  geom_point(alpha = 0.7) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  facet_wrap(~ method, scales = "free", ncol = 1) +
+  labs(
+    x = "Non CW",
+    y = "CW",
+    title = "Scatterplot of CW vs Non CW by Method"
+  ) +
+  expand_limits(x = 0, y = 0) +  # ensure axes include 0
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"))
+
+
+```
+
+

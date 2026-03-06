@@ -1,0 +1,650 @@
+---
+title: "Simulations preferring distance based"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+### source
+
+```{r}
+
+library(AntMAN)
+library(mclust)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(salso)
+library(mclust)
+
+source("src/mixture_utils.R", echo=TRUE)
+source("src/distances.R", echo=TRUE)
+source("src/search_algorithm.R", echo=TRUE)
+
+```
+
+This file serves to explore cases in which the density based methods have an advantage over classical allocation based methods like the binder or VI.
+
+# Overlap
+
+There is some reason to believe that overlapping clusters could be easier to find with a density based method. If using mcmc, salso could get worse from label switching.
+
+## Simulate overlapping data
+
+```{r}
+
+set.seed(1)
+
+N = 100
+K = 3
+alpha = 1
+mu_true = c(-2, 0, 1)    
+sd_true = c(1, 2, 1) * 0.2   
+
+#--- Component weights from Dirichlet(alpha,...,alpha) ---
+weights_true <- c(0.3, 0.5, 0.2)
+
+#--- Assign clusters ---
+cluster_true <- rep(c(1:K), weights_true * N)
+
+#--- Initialize data ---
+y <- numeric(N)
+
+#--- Generate Gaussian data ---
+for (k in 1:K) {
+  
+  idx <- cluster_true == k
+  ni  <- sum(idx)
+  y[idx] <- rnorm(ni, mean = mu_true[k], sd = sd_true[k])
+  
+}
+
+plot(density(y))
+points(y, rep(0, N), col = cluster_true)
+
+```
+
+## Run Gaussian mixture (AntMAN)
+
+```{r}
+
+  alpha_0 <- 1
+  kappa_0 <- 0.01
+  nu_0 <- 3 # alpha of the invgamma prior
+  sig2_0 <- 2 # beta of the inverse-gamma prior
+  mu_0 <- 0 # prior mean of the mean
+  
+  # -----------------------------
+  # MCMC settings
+  # -----------------------------
+  n_iter <- 2e4
+  burn_in <- n_iter / 4
+  thin <- 10
+  
+  # -----------------------------
+  # Define ANTMAN priors & parameters
+  # -----------------------------
+  mixture_uvn_params <- AntMAN::AM_mix_hyperparams_uninorm(
+    m0 = mu_0, k0 = kappa_0, nu0 = nu_0, sig02 = sig2_0
+  )
+  
+  mcmc_params <- AntMAN::AM_mcmc_parameters(
+    niter = n_iter, burnin = burn_in, thin = thin, verbose = 1
+  )
+  
+  components_prior <- AntMAN::AM_mix_components_prior_pois(Lambda = K)
+  
+  # -----------------------------
+  # Run MCMC and cluster
+  # -----------------------------
+  mix_post_draws <- AntMAN::AM_mcmc_fit(
+    y = y,
+    mix_kernel_hyperparams = mixture_uvn_params,
+    mix_components_prior = components_prior,
+    mcmc_parameters = mcmc_params
+  )
+  
+  eam <- AM_clustering(mix_post_draws)  # M*n matrix
+  
+  clustering_matrix <- eam + 1
+
+  binder_loss <- apply(
+    clustering_matrix,
+    MARGIN = 1,
+    FUN = function(cl) binder(truth = cluster_true , estimate = cl)
+  )
+  
+  vi_loss <- apply(
+    clustering_matrix,
+    MARGIN = 1,
+    FUN = function(cl) VI(truth = cluster_true , estimate = cl)
+  )
+  
+```
+
+
+
+
+
+```{r}
+
+# 
+# # --- Best solution per method × cw ---
+# best_solutions <- results_df %>%
+#   group_by(method, cw) %>%
+#   slice_min(distance, n = 1, with_ties = FALSE) %>%
+#   ungroup() %>%
+#   mutate(
+#     Clustering = paste(method, cw, sep = " | "),
+#     index = index,
+#     ari = sapply(index, function(i)
+#       adjustedRandIndex(clustering_matrix[i, ], cluster_true)
+#     )
+#   )
+# 
+# # --- Add Truth as a pseudo-solution ---
+# truth_df <- tibble(
+#   Clustering = "Truth",
+#   index = NA_integer_,
+#   ari = 1
+# )
+# 
+# best_solutions <- bind_rows(
+#   truth_df,
+#   best_solutions %>% select(Clustering, index, ari)
+# )
+# 
+# # --- Build plotting data ---
+# plot_long <- best_solutions %>%
+#   mutate(
+#     Cluster = list(cluster_true),
+#     Cluster = ifelse(Clustering == "Truth", Cluster,
+#                      lapply(index, function(i) clustering_matrix[i, ]))
+#   ) %>%
+#   unnest(Cluster) %>%
+#   mutate(
+#     y = rep(y, times = nrow(best_solutions)),
+#     Cluster = factor(Cluster)
+#   )
+# 
+# # --- ARI labels ---
+# labels_df <- best_solutions %>%
+#   mutate(
+#     label = paste0("ARI: ", round(ari, 3)),
+#     x = max(y),
+#     y = 0.1
+#   ) %>%
+#   select(Clustering, label, x, y)
+# 
+# # --- Plot ---
+# ggplot(plot_long, aes(x = y, y = 0, color = Cluster)) +
+#   geom_point(size = 3, alpha = 0.7) +
+#   geom_text(
+#     data = labels_df,
+#     aes(x = x, y = y, label = label),
+#     inherit.aes = FALSE,
+#     hjust = 1,
+#     size = 4,
+#     color = "black"
+#   ) +
+#   facet_wrap(~ Clustering, ncol = 1) +
+#   theme_minimal() +
+#   theme(
+#     axis.text.y  = element_blank(),
+#     axis.ticks.y = element_blank(),
+#     panel.grid.major.y = element_blank(),
+#     panel.grid.minor.y = element_blank()
+#   ) +
+#   labs(
+#     x = "Data (y)",
+#     y = "",
+#     color = "Cluster",
+#     title = "Best clustering per method (including Truth)"
+#   )
+
+
+```
+
+
+```{r}
+#options(error = recover)
+options(error = NULL)
+# =============================================================================
+# New simulation study using the full search algorithm (initialisation + sweetening)
+# (merge-split phase turned off for now – n_ms = 0)
+# =============================================================================
+
+prior_list <- list(
+  alpha_0 = 1,
+  kappa_0 = 0.01,
+  mu_0    = 0,
+  a_0     = 2,
+  b_0     = 5
+)
+
+# ----------------------------------------------------------------------------
+# Configurations we want to test
+# ----------------------------------------------------------------------------
+configs <- rbind(
+  data.frame(method = "KS",       clusterwise = FALSE, version = "grid",    stringsAsFactors = FALSE),
+  data.frame(method = "KS",       clusterwise = TRUE,  version = "grid",    stringsAsFactors = FALSE),
+  data.frame(method = "Pearson",  clusterwise = FALSE, version = "grid",    stringsAsFactors = FALSE),
+  data.frame(method = "Pearson",  clusterwise = TRUE,  version = "grid",    stringsAsFactors = FALSE),
+  data.frame(method = "Wasserstein", clusterwise = FALSE, version = "grid",    stringsAsFactors = FALSE),
+  #data.frame(method = "Wasserstein", clusterwise = TRUE,  version = "grid",    stringsAsFactors = FALSE),
+  #data.frame(method = "Wasserstein", clusterwise = FALSE, version = "quantile", stringsAsFactors = FALSE),
+  data.frame(method = "Wasserstein", clusterwise = TRUE,  version = "quantile", stringsAsFactors = FALSE)
+)
+
+# ----------------------------------------------------------------------------
+# Run search algorithm for every configuration
+# ----------------------------------------------------------------------------
+results_list <- vector("list", nrow(configs))
+
+for (i in seq_len(nrow(configs))) {
+#i = 1
+  cfg <- configs[i, ]
+  
+  cat(sprintf("Running %s (clusterwise=%s, version=%s)...\n",
+              cfg$method, cfg$clusterwise, cfg$version))
+  set.seed(1)
+  fit <- run_clustering(
+    data              = y,
+    clustering_matrix = clustering_matrix,
+    posterior_draws   = mix_post_draws,
+    prior_list        = prior_list,
+    method            = cfg$method,
+    clusterwise       = cfg$clusterwise,
+    estimator         = "mle",
+    n_runs            = 2,          # modest number of random starts
+    n_sweet           = 3, #80,         # enough for sweetening to converge in this example
+    tol               = 1e-10,
+    n_ms              = 0,          # ← merge-split turned off (as requested)
+    n_merge           = 0,
+    n_split           = 0,
+    version           = cfg$version,
+    M                 = 2000,
+    alpha_0           = 5
+  )
+  # check if there are gaps in the clustering:
+  if(all(apply(fit$c_record, 1, max) > 3)){
+    if(!any(sapply(apply(fit$c_record, 1, table), length) == apply(fit$c_record, 1, max))){
+      stop(paste0("Config ", i, " showed a gap"))
+    }
+  }else{
+    if(!any(dim(apply(fit$c_record, 1, table))[2] == apply(fit$c_record, 1, max))){
+      stop(paste0("Config ", i, " showed a gap"))
+    }
+  }
+  
+  
+  # Take the best run (lowest final distance)
+  best_run <- which.min(fit$distance_record)
+  
+  results_list[[i]] <- data.frame(
+    method        = cfg$method,
+    clusterwise   = cfg$clusterwise,
+    version       = cfg$version,
+    final_D       = fit$distance_record[best_run],
+    final_c       = I(list(fit$final_clustering)),
+    ARI           = adjustedRandIndex(fit$final_clustering, cluster_true),
+    n_sweet       = fit$total_accepted_sweets[best_run],
+    clustering    = I(list(fit$c_record)),   # keep as list column for later unnest
+    stringsAsFactors = FALSE
+  )
+}
+
+```
+
+
+```{r}
+
+# ----------------------------------------------------------------------------
+# Add Binder and VI as baselines (computed on the raw AntMAN matrix)
+# ----------------------------------------------------------------------------
+binder_best_idx <- which.min(binder_loss)
+vi_best_idx     <- which.min(vi_loss)
+
+results_list[[7]] <- data.frame(
+  method      = "Binder",
+  clusterwise = FALSE,
+  version     = NA_character_,
+  final_D     = min(binder_loss),
+  final_c       = I(list(clustering_matrix[binder_best_idx, ])),
+  ARI         = adjustedRandIndex(clustering_matrix[binder_best_idx, ], cluster_true),
+  n_sweet     = NA_integer_,
+  clustering  = I(list(clustering_matrix[binder_best_idx, ])),
+  stringsAsFactors = FALSE
+)
+
+results_list[[8]] <- data.frame(
+  method      = "VI",
+  clusterwise = FALSE,
+  version     = NA_character_,
+  final_D     = min(vi_loss),
+  final_c       = I(list(clustering_matrix[vi_best_idx, ])),
+  ARI         = adjustedRandIndex(clustering_matrix[vi_best_idx, ], cluster_true),
+  n_sweet     = NA_integer_,
+  clustering  = I(list(clustering_matrix[vi_best_idx, ])),
+  stringsAsFactors = FALSE
+)
+
+
+
+results_df <- do.call(rbind, results_list)
+
+# Create a nice label for faceting/plotting
+results_df <- results_df %>%
+  mutate(
+    label = case_when(
+      method %in% c("Binder", "VI") ~ method,
+      TRUE ~ paste0(
+        method,
+        ifelse(clusterwise, " (cw)", ""),
+        ifelse(!is.na(version) & method == "Wasserstein", 
+               paste0(" | ", version), 
+               "")
+      )
+    )
+  )
+
+print(results_df %>% select(label, final_D, ARI, n_sweet))
+
+```
+
+```{r}
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(mclust)   # for adjustedRandIndex, if not already loaded
+
+# ----------------------------------------------------------------------------
+# Prepare truth as a reference row (mimicking the old truth_df)
+# ----------------------------------------------------------------------------
+truth_row <- tibble(
+  label       = "Truth",
+  final_D     = NA_real_,
+  ARI         = 1.0,
+  clustering  = list(cluster_true)
+)
+
+# Combine with algorithm results
+plot_df <- bind_rows(
+  truth_row,
+  results_df %>% 
+    select(label, final_D, ARI, final_c)%>%
+     rename(clustering = final_c)
+)  %>% 
+  # Add a sorting key so Truth appears first, then ordered by ARI descending
+  mutate(
+    sort_key = if_else(label == "Truth", Inf, ARI),
+    label    = factor(label, levels = unique(label[order(-sort_key)]))
+  ) %>%
+  arrange(desc(sort_key))
+
+# ----------------------------------------------------------------------------
+# Unnest into long format for plotting
+# ----------------------------------------------------------------------------
+plot_long <- plot_df %>%
+  mutate(
+    obs_idx = row_number()   # not really needed, but for safety
+  ) %>%
+  unnest_longer(clustering, indices_to = "point_idx", values_to = "Cluster") %>%
+  mutate(
+    y      = rep(y, times = nrow(plot_df)),          # repeat data values for each method
+    Cluster = factor(Cluster)
+  )
+
+# ----------------------------------------------------------------------------
+# Prepare ARI annotation positions (placed at right side of each facet)
+# ----------------------------------------------------------------------------
+labels_df <- plot_df %>%
+  mutate(
+    label_text = sprintf("ARI = %.3f", ARI),
+    x          = max(y) + diff(range(y)) * 0.02,   # slight offset from max y
+    y_pos      = 0.1                               # fixed vertical position
+  ) %>%
+  select(label, label_text, x, y_pos)
+
+# ----------------------------------------------------------------------------
+# Plot
+# ----------------------------------------------------------------------------
+p <- plot_long %>% filter(label != "KS") %>% 
+  ggplot(aes(x = y, y = 0, color = Cluster)) +
+  geom_point(size = 2.8, alpha = 0.75, stroke = 0.4) +
+  geom_text(
+    data = labels_df,
+    aes(x = x, y = y_pos, label = label_text),
+    inherit.aes = FALSE,
+    hjust = 1,
+    vjust = 0.5,
+    size  = 3.8,
+    fontface = "bold",
+    color = "black"
+  ) +
+  facet_wrap(~ label, ncol = 1, strip.position = "left") +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.y       = element_blank(),
+    axis.ticks.y      = element_blank(),
+    axis.title.y      = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    strip.text        = element_text(size = 11, face = "bold", hjust = 0),
+    strip.background  = element_rect(fill = "grey92"),
+    strip.placement   = "outside",
+    legend.position   = "none",               # optional: remove if too many clusters
+    plot.title        = element_text(hjust = 0.5, face = "bold"),
+    plot.margin       = margin(10, 25, 10, 10)
+  ) +
+  labs(
+    x     = expression(italic(y)),
+    title = "Best clustering per method / loss (including ground truth)"
+  )
+
+print(p)
+
+# Optional: save with good resolution for paper
+# ggsave("best_clusterings_comparison.pdf", p, width = 8, height = 1.4 * nlevels(plot_long$label), dpi = 400)
+
+```
+
+
+# Conclusion for the sweetening
+
+It seems the sweetening is now successful in a couple of cases which allow the algorithm to estimate clusterings not visited by the MCMC.
+By controlling the alpha_0/shape hyperparameter of the variance prior, we can incentivize the creation of new clusters.
+
+
+Next step is to test the merge and split part
+
+
+# Merge and Split Test
+
+```{r}
+#options(error = recover)
+#options(error = NULL)
+
+# =============================================================================
+# New simulation study using the full search algorithm (initialisation + sweetening)
+# (merge-split phase turned off for now – n_ms = 0)
+# =============================================================================
+
+prior_list <- list(
+  alpha_0 = 1,
+  kappa_0 = 0.01,
+  mu_0    = 0,
+  a_0     = 2,
+  b_0     = 5
+)
+
+# ----------------------------------------------------------------------------
+# Configurations we want to test
+# ----------------------------------------------------------------------------
+
+n_ms = 5
+n_merge = 10
+
+configs_ms <- rbind(
+  data.frame(method="KS", clusterwise=FALSE, version="grid", n_sweet=1, n_ms = n_ms, n_merge=n_merge, n_split=4),
+  data.frame(method="Pearson", clusterwise=FALSE, version="grid", n_sweet=1, n_ms = n_ms, n_merge=n_merge, n_split=4),
+  data.frame(method="Wasserstein", clusterwise=TRUE, version="quantile", n_sweet=1, n_ms = n_ms, n_merge=n_merge, n_split=4),
+  data.frame(method="Wasserstein", clusterwise=FALSE, version="grid", n_sweet=1, n_ms = n_ms, n_merge=n_merge, n_split=4)
+)
+
+# ----------------------------------------------------------------------------
+# Run search algorithm for every configuration
+# ----------------------------------------------------------------------------
+results_list <- vector("list", nrow(configs_ms))
+
+for (i in seq_len(nrow(configs_ms))) {
+#i = 1
+  cfg <- configs_ms[i, ]
+  
+  cat(sprintf("Running %s (clusterwise=%s, version=%s)...\n",
+              cfg$method, cfg$clusterwise, cfg$version))
+  set.seed(1)
+  fit <- run_clustering(
+    data              = y,
+    clustering_matrix = clustering_matrix,
+    posterior_draws   = mix_post_draws,
+    prior_list        = prior_list,
+    method            = cfg$method,
+    clusterwise       = cfg$clusterwise,
+    estimator         = "mle",
+    n_runs            = 3,          # modest number of random starts
+    tol               = 1e-10,
+    n_sweet   = cfg$n_sweet,
+    n_ms      = cfg$n_ms,
+    n_merge   = cfg$n_merge,
+    n_split   = cfg$n_split,
+    version           = cfg$version,
+    M                 = 2000,
+    alpha_0           = 5
+  )
+  # check if there are gaps in the clustering:
+
+  has_gap <- apply(fit$c_record, 1, function(row) length(unique(row))) < apply(fit$c_record, 1, max)
+  
+  if (any(has_gap)) {
+    cat(sprintf("Config %d shows labeling gaps in %d rows\n", i, sum(has_gap)))
+    print(which(has_gap))
+    stop(sprintf("Config %d showed a gap", i))
+  }
+  
+  # After running fit <- run_clustering(...)
+
+best_run <- which.min(fit$distance_record)
+
+n_merge_accept_best <- fit$total_accepted_merges[best_run]
+n_split_accept_best <- fit$total_accepted_splits[best_run]
+
+
+results_list[[i]] <- data.frame(
+  method          = cfg$method,
+  clusterwise     = cfg$clusterwise,
+  version         = cfg$version,
+  n_sweet         = cfg$n_sweet,                # requested value
+  n_ms            = cfg$n_ms,
+  n_merge         = cfg$n_merge,
+  n_split         = cfg$n_split,
+  final_D         = fit$distance_record[best_run],
+  ARI             = adjustedRandIndex(fit$final_clustering, cluster_true),
+  n_merge_accept  = n_merge_accept_best,
+  n_split_accept  = n_split_accept_best,
+  n_sweet_actual  = fit$total_accepted_sweets[best_run],  # actual iterations run
+  clustering      = I(list(fit$final_clustering)),        # final assignment vector
+  # Optional: keep full history if memory allows and needed for diagnostics
+  # c_record        = I(list(fit$c_record)),
+  stringsAsFactors = FALSE
+)
+
+}
+
+
+
+
+```
+
+
+
+```{r}
+
+# ----------------------------------------------------------------------------
+# Add Binder and VI as baselines (computed directly on posterior samples)
+# ----------------------------------------------------------------------------
+binder_best_idx <- which.min(binder_loss)
+vi_best_idx     <- which.min(vi_loss)
+
+results_list[[length(results_list) + 1]] <- data.frame(
+  method          = "Binder",
+  clusterwise     = FALSE,
+  version         = NA_character_,
+  n_sweet         = NA_integer_,
+  n_ms            = NA_integer_,
+  n_merge         = NA_integer_,
+  n_split         = NA_integer_,
+  final_D         = min(binder_loss, na.rm = TRUE),
+  ARI             = adjustedRandIndex(clustering_matrix[binder_best_idx, ], cluster_true),
+  n_merge_accept  = NA_integer_,
+  n_split_accept  = NA_integer_,
+  n_sweet_actual  = NA_integer_,
+  clustering      = I(list(clustering_matrix[binder_best_idx, ])),
+  stringsAsFactors = FALSE
+)
+
+results_list[[length(results_list) + 1]] <- data.frame(
+  method          = "VI",
+  clusterwise     = FALSE,
+  version         = NA_character_,
+  n_sweet         = NA_integer_,
+  n_ms            = NA_integer_,
+  n_merge         = NA_integer_,
+  n_split         = NA_integer_,
+  final_D         = min(vi_loss, na.rm = TRUE),
+  ARI             = adjustedRandIndex(clustering_matrix[vi_best_idx, ], cluster_true),
+  n_merge_accept  = NA_integer_,
+  n_split_accept  = NA_integer_,
+  n_sweet_actual  = NA_integer_,
+  clustering      = I(list(clustering_matrix[vi_best_idx, ])),
+  stringsAsFactors = FALSE
+)
+
+# Combine into data frame
+results_df <- do.call(rbind, results_list)
+
+# Create faceting label (unchanged)
+results_df <- results_df %>%
+  mutate(
+    label = case_when(
+      method %in% c("Binder", "VI") ~ method,
+      
+      TRUE ~ paste0(
+        method,
+        if_else(clusterwise, " (cw)", "", missing = ""),
+        if_else(
+          !is.na(version) & method == "Wasserstein",
+          paste0(" | ", version),
+          "",
+          missing = ""
+        )
+      )
+    ),
+    # Optional: nicer sorting — put Truth first if you add it later, then Binder/VI, then methods by ARI or alphabetically
+    label = forcats::fct_relevel(label, "Truth", after = 0L),  # if you have "Truth"
+    # or just leave as is / use reorder() later for plotting
+    label = factor(label)
+  )
+
+# Quick summary print
+print(results_df %>% 
+        select(label, final_D, ARI, n_sweet, n_ms, n_merge_accept, n_split_accept) %>%
+        arrange(final_D))
+
+```
+
+
+
+

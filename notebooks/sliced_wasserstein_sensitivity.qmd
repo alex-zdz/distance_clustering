@@ -1,0 +1,1357 @@
+---
+title: "Sliced Wasserstein sensitivity analysis"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+### source
+
+```{r}
+
+library(mclust)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+source("C:/Users/alexm/NUS Dropbox/Alexander Mozdzen/distance_clustering/src/mixture_utils.R", echo=TRUE)
+
+```
+
+### Simulate Data
+
+```{r}
+
+# -----------------------------
+# Simulation parameters
+# -----------------------------
+N <- 100
+K <- 3
+D = 2
+alpha_0 <- 1
+
+set.seed(2)
+  
+simdata <- generate_mixture_data(
+    N,
+    K,
+    dim = D,
+    alpha = alpha_0,
+    mu_true = NULL,      
+    Sigma_true = NULL 
+)
+
+y <- simdata$data
+cluster_true <- simdata$cluster_true
+weights_true <- simdata$weights_true
+Sigma_true <- simdata$Sigma_true
+
+plot(y,  col = cluster_true)
+
+```
+
+Idea: test the accuracy of the sliced wasserstein distance in comparing the "posterior" parameters corresponding to more or less accurate clusterings.
+
+### 3 different scenarios
+
+We compare the SW for the true clustering, a completely wrong clustering and a reasonable estimate.
+
+```{r}
+
+c_mid <- cluster_true
+c_mid[c_mid == 2] <- 1
+c_mid[c_mid == 3] <- 2
+c_wrong <- cluster_true[sample(100)]
+
+par(mfrow=c(1,3))
+plot(y,  col = cluster_true)
+plot(y,  col = c_mid)
+plot(y,  col = c_wrong)
+
+
+```
+
+## Posterior estimate conditional on the different clusterings using the initialization phase of our algorithm
+
+```{r}
+
+compute_distance <- function(data, weight, mean, var, method = "KS", clusterwise = FALSE,
+                             c_alloc = NULL, L = 100) {
+  
+  if (is.null(dim(data))) {
+    D <- 1
+  } else {
+    D <- ncol(data)
+  }
+  
+  if(D != 1 & method != "Wasserstein"){
+    stop("only Sliced Wasserstein for higher dimensions")
+  }
+  
+  K = length(weight)
+  
+  if (clusterwise) {
+    
+    if (is.null(c_alloc)) {
+      stop("clusterwise = TRUE requires c_alloc")
+    }
+    
+    if (!is.null(dim(data))) {
+      stop("cluster-wise distance currently only implemented for 1D")
+    }
+    
+    K <- length(weight)
+    Dk <- numeric(K)
+    
+    for (k in seq_len(K)) {
+      yk <- data[c_alloc == k]
+      
+      # skip empty / degenerate clusters
+      if (length(yk) < 2) {
+        Dk[k] <- 0
+        next
+      }
+      
+      # component-wise distance
+      if (method == "KS") {
+        Dk[k] <- KS_mixture_distance(
+          yk,
+          weight = 1,
+          mean   = mean[k],
+          sig2   = var[k]
+        )
+        
+      } else if (method == "Pearson") {
+        Dk[k] <- Pearson_mixture_distance(
+          yk,
+          weight = 1,
+          mean   = mean[k],
+          sig2   = var[k]
+        )
+        
+      } else if (method == "Wasserstein") {
+        
+        M <- 2e3
+        t <- seq(
+          from = min(yk) - 3 * sqrt(var[k]),
+          to   = max(yk) + 3 * sqrt(var[k]),
+          length.out = M
+        )
+        
+        I0 <- mixture_pdf_1D(t, mean[k], sig2 = var[k], weight = 1)
+        I1 <- emp_pdf(t, yk)
+        
+        Dk[k] <- Wasserstein_1D(I0, I1, p = 2)
+        
+      } else {
+        stop("Unknown distance method")
+      }
+    }
+    
+    # mixture-weight–weighted aggregation
+    return(sum(weight * Dk))
+    
+  }else{
+    
+    if (method == "KS") {
+      KS_mixture_distance(data, weight, mean, sig2 = var)
+    }else if (method == "Wasserstein") {
+      # for now always p = 2, consider adapting
+      M = 2e3
+      t <- seq(
+        from = -max(abs(y)) * sqrt(2 * D),
+        to   =  max(abs(y)) * sqrt(2 * D),
+        length.out = M
+      )
+      
+      if(D == 1){
+        
+        I0 = mixture_pdf_1D(t, mean, sig2 = var, weight)
+        I1 = emp_pdf(t, data)
+        Wasserstein_1D(I0, I1, p = 2)
+        
+      }else{ # Sliced Wasserstein
+        
+        Sigma = var
+        
+        #L = 100 # for now fixed
+        
+        theta = generate_theta_normal(L, D)
+        yproj = y %*% t(theta)
+        
+        projected_Sigma <- matrix(0, nrow = K, ncol = L)
+        projected_Mu    <- matrix(0, nrow = K, ncol = L)
+        
+        for (k in 1:K) {
+          for (l in 1:L) {
+            projected_Sigma[k, l] <- sqrt( theta[l, , drop = FALSE] %*% Sigma[[k]] %*% t(theta[l, , drop = FALSE]) )
+            projected_Mu[k, l]    <- theta[l, , drop = FALSE] %*% mean[[k]]
+          }
+        }
+        
+        SW = 0
+        
+        for (l in 1:L){
+          RIx = mixture_pdf_1D(t, projected_Mu[,l], projected_Sigma[,l], weight)
+          RIy = emp_pdf(t, yproj[,l])
+          SW = SW + Wasserstein_1D(RIx, RIy,p=2) / L
+        }
+        
+        SW
+        
+      }
+      
+    } else if (method == "Pearson") {
+      Pearson_mixture_distance(data, weight, mean, sig2 = var)
+    } else {
+      stop("Unknown distance method")
+    }
+  }
+  
+}
+```
+
+
+```{r}
+
+D <- ncol(y)
+
+prior_list <- list(
+  alpha_0 = 1,
+  kappa_0 = 1,
+  mu_0    = 0,
+  nu_0    = 5,
+  S_0     = diag(D)
+)
+
+clustering_matrix <- rbind(cluster_true, c_mid, c_wrong)
+n_candidates <- nrow(clustering_matrix)
+
+estimators <- c("posterior", "mle")
+
+# storage
+distance <- matrix(NA, nrow = n_candidates, ncol = length(estimators),
+                   dimnames = list(
+                     paste0("cand_", seq_len(n_candidates)),
+                     estimators
+                   ))
+
+all_params <- vector("list", length(estimators))
+names(all_params) <- estimators
+
+for (est in estimators) {
+  
+  message("Estimator: ", est)
+  params_est <- vector("list", n_candidates)
+  
+  for (i in seq_len(n_candidates)) {
+    c_i <- clustering_matrix[i, ]
+    
+    param <- get_mixture_params(
+      c_alloc    = c_i,
+      data       = y,
+      estimator  = est,
+      prior_list = prior_list
+    )
+    
+    params_est[[i]] <- param
+    
+    distance[i, est] <- compute_distance(
+      y,
+      weight = param$weight_post,
+      mean   = param$mu_post,
+      var    = param$var_post,
+      method = method
+    )
+  }
+  
+  all_params[[est]] <- params_est
+}
+
+distance
+
+
+```
+
+It seems the SW can distinguish correctly between these 3 toy examples and the mle results in lower distances than the posterior.
+
+## Sensitivity wrt the prior parameters
+
+```{r}
+
+## =========================
+## Sensitivity analysis over (nu_0, S_0, alpha_0)
+## =========================
+
+D <- ncol(y)
+
+# Fixed hyperparameters
+mu_0    <- 0
+kappa_0 <- 1
+
+# Sensitivity grids
+alpha_grid <- c(0.1, 1, 10)                 # mixture weight prior
+nu_grid    <- c(D + 1, D + 3, D + 10)        # IW df (must be > D - 1)
+S_scale    <- c(0.5, 1, 2)                   # scale multipliers for S_0
+
+# Base scale matrix
+S_base <- diag(D)
+
+# Candidate clusterings
+clustering_matrix <- rbind(cluster_true, c_mid, c_wrong)
+n_candidates <- nrow(clustering_matrix)
+
+# Storage
+results <- list()
+res_id <- 1
+
+for (alpha_0 in alpha_grid) {
+  for (nu_0 in nu_grid) {
+    for (s_mult in S_scale) {
+
+      prior_list <- list(
+        alpha_0 = alpha_0,
+        kappa_0 = kappa_0,
+        mu_0    = mu_0,
+        nu_0    = nu_0,
+        S_0     = S_base * s_mult
+      )
+
+      distance <- numeric(n_candidates)
+      all_params <- vector("list", n_candidates)
+
+      for (i in seq_len(n_candidates)) {
+        c_i <- clustering_matrix[i, ]
+        param_post <- mixture_posterior(c_i, y, prior_list)
+
+        w_i   <- param_post$weight_post
+        mu_i  <- param_post$mu_post
+        var_i <- param_post$var_post
+
+        all_params[[i]] <- param_post
+        distance[i] <- compute_distance(y, w_i, mu_i, var_i, method)
+      }
+
+      results[[res_id]] <- list(
+        alpha_0 = alpha_0,
+        nu_0    = nu_0,
+        S_mult  = s_mult,
+        distance = distance,
+        params   = all_params
+      )
+      res_id <- res_id + 1
+    }
+  }
+}
+
+# Optional: tidy summary table (one row per prior setting and candidate)
+summary_df <- do.call(rbind, lapply(results, function(r) {
+  data.frame(
+    alpha_0 = r$alpha_0,
+    nu_0    = r$nu_0,
+    S_mult  = r$S_mult,
+    candidate = seq_along(r$distance),
+    distance  = r$distance
+  )
+}))
+
+summary_df
+
+
+```
+
+
+```{r}
+
+D <- ncol(y)
+
+# Fixed hyperparameters
+mu_0    <- 0
+kappa_0 <- 1
+
+# Sensitivity grids (posterior only)
+alpha_grid <- c(0.1, 1, 10)
+nu_grid    <- c(D + 1, D + 3, D + 10)
+S_scale    <- c(0.5, 1, 2)
+
+S_base <- diag(D)
+
+# Candidate clusterings
+clustering_matrix <- rbind(cluster_true, c_mid, c_wrong)
+n_candidates <- nrow(clustering_matrix)
+
+results <- list()
+res_id <- 1
+
+## -------------------------
+## 1) Posterior sensitivity
+## -------------------------
+for (alpha_0 in alpha_grid) {
+  for (nu_0 in nu_grid) {
+    for (s_mult in S_scale) {
+
+      prior_list <- list(
+        alpha_0 = alpha_0,
+        kappa_0 = kappa_0,
+        mu_0    = mu_0,
+        nu_0    = nu_0,
+        S_0     = S_base * s_mult
+      )
+
+      distance <- numeric(n_candidates)
+      all_params <- vector("list", n_candidates)
+
+      for (i in seq_len(n_candidates)) {
+        c_i <- clustering_matrix[i, ]
+
+        param <- get_mixture_params(
+          c_alloc    = c_i,
+          data       = y,
+          estimator  = "posterior",
+          prior_list = prior_list
+        )
+
+        distance[i] <- compute_distance(
+          y,
+          param$weight_post,
+          param$mu_post,
+          param$var_post,
+          method
+        )
+
+        all_params[[i]] <- param
+      }
+
+      results[[res_id]] <- list(
+        estimator = "posterior",
+        alpha_0   = alpha_0,
+        nu_0      = nu_0,
+        S_mult    = s_mult,
+        distance  = distance,
+        params    = all_params
+      )
+      res_id <- res_id + 1
+    }
+  }
+}
+
+## -------------------------
+## 2) MLE (single baseline)
+## -------------------------
+distance_mle <- numeric(n_candidates)
+params_mle <- vector("list", n_candidates)
+
+for (i in seq_len(n_candidates)) {
+  c_i <- clustering_matrix[i, ]
+
+  param <- get_mixture_params(
+    c_alloc   = c_i,
+    data      = y,
+    estimator = "mle"
+  )
+
+  distance_mle[i] <- compute_distance(
+    y,
+    param$weight_post,
+    param$mu_post,
+    param$var_post,
+    method
+  )
+
+  params_mle[[i]] <- param
+}
+
+results[[res_id]] <- list(
+  estimator = "mle",
+  alpha_0   = NA,
+  nu_0      = NA,
+  S_mult    = NA,
+  distance  = distance_mle,
+  params    = params_mle
+)
+
+
+```
+
+### Visualize
+
+```{r}
+
+summary_df <- do.call(rbind, lapply(results, function(r) {
+  data.frame(
+    estimator = r$estimator,
+    alpha_0   = r$alpha_0,
+    nu_0      = r$nu_0,
+    S_mult    = r$S_mult,
+    candidate = seq_along(r$distance),
+    distance  = r$distance
+  )
+}))
+  
+summary_df <- summary_df %>%
+  mutate(
+    estimator = factor(estimator, levels = c("posterior", "mle")),
+    alpha_0   = factor(alpha_0),
+    nu_0      = factor(nu_0),
+    S_mult    = factor(S_mult),
+    candidate = factor(candidate)
+  )
+
+p1 <- summary_df %>%
+  filter(estimator == "posterior") %>%
+  ggplot(aes(x = nu_0, y = distance,
+             color = S_mult, group = S_mult)) +
+  geom_point(alpha = 0.7) +
+  geom_line(alpha = 0.6) +
+  facet_grid(candidate ~ alpha_0, scales = "free_y") +
+  labs(
+    title = "Posterior sensitivity to (nu_0, S_0) by candidate",
+    x = expression(nu[0]),
+    y = "Distance",
+    color = expression("Scale of " * S[0])
+  ) +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"))
+
+print(p1)
+
+# Clearly shows that a lower scale and higher nu give better results except for a very few cases where the scales 0.5 and 1 change rank with different nu_0
+# That would mean that in this case components with a smaller and more concentrated variance are preferred.
+# alpha 0.1 and 1 are fine while 10 apparently forces too many clusters and is worse.
+
+#Do all constellations pick up the correct ranking of the toy example?
+
+
+p2 <- summary_df %>%
+  filter(estimator == "posterior") %>%
+  ggplot(aes(x = candidate, y = distance,
+             color = S_mult, group = S_mult)) +
+  geom_point(alpha = 0.7) +
+  geom_line(alpha = 0.6) +
+  facet_grid(nu_0 ~ alpha_0, scales = "free_y") +
+  labs(
+    title = "Ranking stability across (nu_0, S_0)",
+    x = "Candidate",
+    y = "Distance",
+    color = expression("Scale of " * S[0])
+  ) +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"))
+
+print(p2)
+
+# Yes!
+
+```
+
+
+### Posterior vs. MLE
+
+Looks a bit messy since faceted by nu and alpha and MLE does not have those but overall clear to see that MLE works better.
+
+```{r}
+
+p3 <- summary_df %>%
+  ggplot(aes(x = candidate, y = distance, color = estimator)) +
+  geom_point(position = position_dodge(width = 0.4), size = 2) +
+  facet_grid(nu_0 ~ alpha_0, scales = "free_y") +
+  labs(
+    title = "Posterior vs MLE distances",
+    x = "Candidate",
+    y = "Distance",
+    color = "Estimator"
+  ) +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"))
+
+print(p3)
+
+
+```
+
+
+
+### Sensitivity to L
+
+```{r}
+
+sensitivity_SW_L <- function(
+  data,
+  weight,
+  mean,
+  Sigma,
+  L_grid = c(10, 20, 50, 100, 200, 500),
+  n_rep = 10
+) {
+  
+  results <- expand.grid(
+    L = L_grid,
+    rep = seq_len(n_rep)
+  )
+  
+  results$SW <- NA_real_
+  
+  for (i in seq_len(nrow(results))) {
+    
+    L_i <- results$L[i]
+    
+    results$SW[i] <- compute_distance(
+      data   = data,
+      weight = weight,
+      mean   = mean,
+      var  = Sigma,
+      method = "Wasserstein",
+      L      = L_i    # see note below
+    )
+      
+  }
+  
+  results
+}
+
+
+```
+
+```{r}
+
+
+library(dplyr)
+
+res <- sensitivity_SW_L(
+  data   = y,
+  weight = w_i,
+  mean   = mu_i,
+  Sigma  = var_i,
+  n_rep  = 10
+)
+
+summary_L <- res %>%
+  group_by(L) %>%
+  summarise(
+    SW_mean = mean(SW),
+    SW_sd   = sd(SW),
+    .groups = "drop")
+  
+summary_L    
+    
+
+```
+
+It seems L = 100 should suffice for our purposes now, though depending on the algorithm we might want to trade accuracy for speed.
+
+# Test on posterior clustering estimates
+
+```{r}
+# -----------------------------
+# Simulation parameters
+# -----------------------------
+N <- 100
+K <- 3
+D = 2
+alpha_0 <- 1
+
+set.seed(2)
+  
+simdata <- generate_mixture_data(
+    N,
+    K,
+    dim = D,
+    alpha = alpha_0,
+    mu_true = NULL,      
+    Sigma_true = NULL 
+)
+
+y <- simdata$data
+cluster_true <- simdata$cluster_true
+weights_true <- simdata$weights_true
+Sigma_true <- simdata$Sigma_true
+
+# -----------------------------
+# Prior hyperparameters
+# -----------------------------
+alpha <- 1
+kappa_0 <- 0.1
+Lam_0 <- diag(D) 
+mu_0 <- rep(0, D)
+nu_0 <- D + 2
+
+# -----------------------------
+# MCMC settings
+# -----------------------------
+n_iter <- 1e3
+burn_in <- n_iter / 4
+thin <- 10
+
+# -----------------------------
+# Define ANTMAN priors & parameters
+# -----------------------------
+mixture_mvn_params <- AntMAN::AM_mix_hyperparams_multinorm(
+ mu0 = mu_0, ka0 = kappa_0, nu0 = nu_0, Lam0 = Lam_0
+)
+
+mcmc_params <- AntMAN::AM_mcmc_parameters(
+  niter = n_iter, burnin = burn_in, thin = thin, verbose = 1
+)
+
+components_prior <- AntMAN::AM_mix_components_prior_pois(Lambda = K)
+
+# weights_prior <- AntMAN::AM_mix_weights_prior_gamma(init = 2, a = 1, b = 1)
+
+# -----------------------------
+# Run MCMC and cluster
+# -----------------------------
+mix_post_draws <- AntMAN::AM_mcmc_fit(
+  y = y,
+  mix_kernel_hyperparams = mixture_mvn_params,
+  mix_components_prior = components_prior,
+  # mix_weight_prior = weights_prior,
+  mcmc_parameters = mcmc_params
+)
+
+eam <- AM_clustering(mix_post_draws)  # M*n matrix
+
+```
+
+Helper function for the following analysis:
+
+```{r}
+
+compute_distances <- function(
+  data,
+  clustering_matrix,
+  param_method = c("mcmc", "postmean", "mle"),
+  prior_list = NULL,
+  posterior_params = NULL,
+  distance_method = "KS"
+) {
+  
+  param_method <- match.arg(param_method)
+  n_candidates <- nrow(clustering_matrix)
+  dist <- numeric(n_candidates)
+  
+  for (i in seq_len(n_candidates)) {
+    params <- get_mixture_params(
+      clustering       = clustering_matrix[i, ],
+      data             = data,
+      param_method     = param_method,
+      prior_list       = prior_list,
+      posterior_params = posterior_params,
+      candidate_id     = i
+    )
+    
+    dist[i] <- compute_distance(
+      data,
+      params$weight,
+      params$mean,
+      params$var,
+      method = distance_method
+    )
+  }
+  
+  dist
+}
+
+
+
+```
+
+```{r}
+
+prior_list <- list(
+  alpha_0 = 1,
+  kappa_0 = 1,
+  mu_0    = 0,
+  a_0     = 2,
+  b_0     = 1,
+  nu_0    = 5,
+  S_0     = diag(D)
+)
+
+clustering_matrix <- eam + 1
+posterior_params <- prepare_AM_posterior_params(mix_post_draws)
+
+dist_mcmc <- compute_distances(
+  data = data,
+  clustering_matrix = clustering_matrix,
+  param_method = "mcmc",
+  posterior_params = posterior_params,
+  distance_method = "Wasserstein"
+)
+
+dist_postmean <- compute_distances(
+  data = data,
+  clustering_matrix = clustering_matrix,
+  param_method = "postmean",
+  prior_list = prior_list,
+  distance_method = "Wasserstein"
+)
+
+dist_mle <- compute_distances(
+  data = data,
+  clustering_matrix = clustering_matrix,
+  param_method = "mle",
+  distance_method = "Wasserstein"
+)
+
+results_df <- data.frame(
+  candidate     = seq_len(nrow(clustering_matrix)),
+  dist_mcmc     = dist_mcmc,
+  dist_postmean = dist_postmean,
+  dist_mle      = dist_mle
+)
+
+print(results_df)
+
+
+
+```
+
+
+Compute the corresponding binder estimates:
+
+```{r}
+
+binder_ests <- rep(NA, n_candidates)
+vi_ests <- rep(NA, n_candidates)
+
+for(i in nrow(eam)) {
+binder_ests[i] <- salso::binder(cluster_true,  clustering_matrix[i, ])
+vi_ests[i] <- salso::VI(cluster_true,  clustering_matrix[i, ])
+}
+
+results_df$binder_ests <- binder_ests 
+
+```
+
+
+```{r}
+
+library(mclust)
+library(dplyr)
+library(ggplot2)
+
+# --- Select best clusterings ---
+best_ids <- c(
+  Truth     = NA,
+  MCMC      = which.min(results_df$dist_mcmc),
+  PostMean  = which.min(results_df$dist_postmean),
+  MLE       = which.min(results_df$dist_mle),
+  Binder    = which.min(results_df$binder_ests)
+)
+
+best_clusterings <- list(
+  Truth    = cluster_true,
+  MCMC     = clustering_matrix[best_ids["MCMC"], ],
+  PostMean = clustering_matrix[best_ids["PostMean"], ],
+  MLE      = clustering_matrix[best_ids["MLE"], ],
+  Binder   = clustering_matrix[best_ids["Binder"], ]
+)
+
+# --- ARI vs truth ---
+ari_df <- tibble(
+  Method = names(best_clusterings),
+  ARI = sapply(best_clusterings, function(cl) adjustedRandIndex(cluster_true, cl))
+)
+
+# --- Long plotting data ---
+plot_long_2d <- bind_rows(
+  lapply(names(best_clusterings), function(m) {
+    tibble(
+      x1 = y[,1],
+      x2 = y[,2],
+      Cluster = factor(best_clusterings[[m]]),
+      Method = m
+    )
+  })
+)
+
+# --- ARI label positions (top-right of each facet) ---
+label_pos <- plot_long_2d %>%
+  group_by(Method) %>%
+  summarise(
+    x_pos = max(x1),
+    y_pos = max(x2),
+    .groups = "drop"
+  )
+
+ari_df <- ari_df %>%
+  left_join(label_pos, by = "Method") %>%
+  mutate(label = paste0("ARI: ", round(ARI, 3)))
+
+# --- Plot ---
+ggplot(plot_long_2d, aes(x = x1, y = x2, color = Cluster)) +
+  geom_point(alpha = 0.75, size = 2.5) +
+  geom_text(
+    data = ari_df,
+    aes(x = x_pos, y = y_pos, label = label),
+    inherit.aes = FALSE,
+    hjust = 1.05,
+    vjust = 1.2,
+    size = 4,
+    color = "black"
+  ) +
+  facet_wrap(~ Method, ncol = 2) +
+  theme_minimal() +
+  labs(
+    x = expression(y[1]),
+    y = expression(y[2]),
+    color = "Cluster",
+    title = "Best Clusterings per Method (2D) with ARI vs Truth"
+  )
+
+
+```
+
+The MLE solution seems to be doing very good!
+
+### Correlation with binder
+
+```{r}
+
+# Add binder_ests to results_df (if not already)
+results_df <- results_df %>%
+  mutate(binder_ests = binder_ests)
+
+# Gather distance columns into long format for faceting
+# Replace with your actual distance column names
+results_long <- results_df %>%
+  select(binder_ests, dist_mcmc, dist_postmean, dist_mle) %>%
+  pivot_longer(
+    cols = starts_with("dist_"),
+    names_to = "method",
+    values_to = "distance"
+  ) %>%
+  mutate(
+    method = factor(method,
+                    levels = c("dist_mcmc", "dist_postmean", "dist_mle"),
+                    labels = c("MCMC posterior", "Posterior Mean", "MLE"))
+  )
+
+
+# Plot with facets by method
+p <- ggplot(results_long, aes(x = distance, y = binder_ests)) +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  facet_wrap(~ method, scales = "free", ncol = 1) +
+  labs(
+    x = "Distance",
+    y = "Binder Loss",
+    title = "Comparison of Distance Metrics vs Binder Loss"
+  ) +
+  theme_minimal()
+
+print(p)
+
+```
+
+
+Weirdly not even the MLE solution seems to correlate with the binder estimates.
+
+
+# 3 D
+
+```{r}
+
+# -----------------------------
+# Simulation parameters
+# -----------------------------
+N <- 100
+K <- 3
+D = 3
+alpha_0 <- 1
+
+set.seed(2)
+  
+simdata <- generate_mixture_data(
+    N,
+    K,
+    dim = D,
+    alpha = alpha_0,
+    mu_true = NULL,      
+    Sigma_true = NULL 
+)
+
+y <- simdata$data
+cluster_true <- simdata$cluster_true
+weights_true <- simdata$weights_true
+Sigma_true <- simdata$Sigma_true
+
+library(plotly)
+
+stopifnot(ncol(y) == 3)
+
+plot_ly(
+  x = y[, 1],
+  y = y[, 2],
+  z = y[, 3],
+  color = factor(cluster_true),
+  colors = "Set1",
+  type = "scatter3d",
+  mode = "markers",
+  marker = list(size = 5)
+) %>%
+  layout(
+    scene = list(
+      xaxis = list(title = "y1"),
+      yaxis = list(title = "y2"),
+      zaxis = list(title = "y3")
+    ),
+    legend = list(title = list(text = "True cluster"))
+  )
+
+
+
+```
+
+
+```{r}
+# -----------------------------
+# Simulation parameters
+# -----------------------------
+N <- 100
+K <- 3
+D = 3
+alpha_0 <- 1
+
+set.seed(2)
+  
+simdata <- generate_mixture_data(
+    N,
+    K,
+    dim = D,
+    alpha = alpha_0,
+    mu_true = NULL,      
+    Sigma_true = NULL 
+)
+
+y <- simdata$data
+cluster_true <- simdata$cluster_true
+weights_true <- simdata$weights_true
+Sigma_true <- simdata$Sigma_true
+
+# -----------------------------
+# Prior hyperparameters
+# -----------------------------
+alpha <- 1
+kappa_0 <- 0.1
+Lam_0 <- diag(D) 
+mu_0 <- rep(0, D)
+nu_0 <- D + 2
+
+# -----------------------------
+# MCMC settings
+# -----------------------------
+n_iter <- 1e3
+burn_in <- n_iter / 4
+thin <- 10
+
+# -----------------------------
+# Define ANTMAN priors & parameters
+# -----------------------------
+mixture_mvn_params <- AntMAN::AM_mix_hyperparams_multinorm(
+ mu0 = mu_0, ka0 = kappa_0, nu0 = nu_0, Lam0 = Lam_0
+)
+
+mcmc_params <- AntMAN::AM_mcmc_parameters(
+  niter = n_iter, burnin = burn_in, thin = thin, verbose = 1
+)
+
+components_prior <- AntMAN::AM_mix_components_prior_pois(Lambda = K)
+
+# weights_prior <- AntMAN::AM_mix_weights_prior_gamma(init = 2, a = 1, b = 1)
+
+# -----------------------------
+# Run MCMC and cluster
+# -----------------------------
+mix_post_draws <- AntMAN::AM_mcmc_fit(
+  y = y,
+  mix_kernel_hyperparams = mixture_mvn_params,
+  mix_components_prior = components_prior,
+  # mix_weight_prior = weights_prior,
+  mcmc_parameters = mcmc_params
+)
+
+eam <- AM_clustering(mix_post_draws)  # M*n matrix
+
+```
+
+Helper function for the following analysis:
+
+```{r}
+
+compute_distances <- function(
+  data,
+  clustering_matrix,
+  param_method = c("mcmc", "postmean", "mle"),
+  prior_list = NULL,
+  posterior_params = NULL,
+  distance_method = "KS"
+) {
+  
+  param_method <- match.arg(param_method)
+  n_candidates <- nrow(clustering_matrix)
+  dist <- numeric(n_candidates)
+  
+  for (i in seq_len(n_candidates)) {
+    params <- get_mixture_params(
+      clustering       = clustering_matrix[i, ],
+      data             = data,
+      param_method     = param_method,
+      prior_list       = prior_list,
+      posterior_params = posterior_params,
+      candidate_id     = i
+    )
+    
+    dist[i] <- compute_distance(
+      data,
+      params$weight,
+      params$mean,
+      params$var,
+      method = distance_method
+    )
+  }
+  
+  dist
+}
+
+
+
+```
+
+```{r}
+
+prior_list <- list(
+  alpha_0 = 1,
+  kappa_0 = 1,
+  mu_0    = 0,
+  a_0     = 2,
+  b_0     = 1,
+  nu_0    = 5,
+  S_0     = diag(D)
+)
+
+data = y
+clustering_matrix <- eam + 1
+posterior_params <- prepare_AM_posterior_params(mix_post_draws)
+
+dist_mcmc <- compute_distances(
+  data = data,
+  clustering_matrix = clustering_matrix,
+  param_method = "mcmc",
+  posterior_params = posterior_params,
+  distance_method = "Wasserstein"
+)
+
+dist_postmean <- compute_distances(
+  data = data,
+  clustering_matrix = clustering_matrix,
+  param_method = "postmean",
+  prior_list = prior_list,
+  distance_method = "Wasserstein"
+)
+
+dist_mle <- compute_distances(
+  data = data,
+  clustering_matrix = clustering_matrix,
+  param_method = "mle",
+  distance_method = "Wasserstein"
+)
+
+binder_ests <- rep(NA, n_candidates)
+vi_ests <- rep(NA, n_candidates)
+
+for(i in 1:nrow(eam)) {
+binder_ests[i] <- salso::binder(cluster_true,  clustering_matrix[i, ])
+vi_ests[i] <- salso::VI(cluster_true,  clustering_matrix[i, ])
+}
+
+
+results_df <- data.frame(
+  candidate     = seq_len(nrow(clustering_matrix)),
+  dist_mcmc     = dist_mcmc,
+  dist_postmean = dist_postmean,
+  dist_mle      = dist_mle
+)
+
+print(results_df)
+
+
+results_df$binder_ests <- binder_ests 
+results_df$vi_ests <- vi_ests 
+
+```
+
+
+
+```{r}
+
+library(mclust)
+library(dplyr)
+library(ggplot2)
+
+# --- Select best clusterings ---
+best_ids <- c(
+  Truth     = NA,
+  MCMC      = which.min(results_df$dist_mcmc),
+  PostMean  = which.min(results_df$dist_postmean),
+  MLE       = which.min(results_df$dist_mle),
+  Binder    = which.min(results_df$binder_ests),
+  VI    = which.min(results_df$vi_ests)
+)
+
+best_clusterings <- list(
+  Truth    = cluster_true,
+  MCMC     = clustering_matrix[best_ids["MCMC"], ],
+  PostMean = clustering_matrix[best_ids["PostMean"], ],
+  MLE      = clustering_matrix[best_ids["MLE"], ],
+  Binder   = clustering_matrix[best_ids["Binder"], ],
+  VI   = clustering_matrix[best_ids["VI"], ]
+)
+
+# --- ARI vs truth ---
+ari_df <- tibble(
+  Method = names(best_clusterings),
+  ARI = sapply(best_clusterings, function(cl) adjustedRandIndex(cluster_true, cl))
+)
+
+# --- Long plotting data ---
+plot_long_2d <- bind_rows(
+  lapply(names(best_clusterings), function(m) {
+    tibble(
+      x1 = y[,1],
+      x2 = y[,2],
+      Cluster = factor(best_clusterings[[m]]),
+      Method = m
+    )
+  })
+)
+
+# --- ARI label positions (top-right of each facet) ---
+label_pos <- plot_long_2d %>%
+  group_by(Method) %>%
+  summarise(
+    x_pos = max(x1),
+    y_pos = max(x2),
+    .groups = "drop"
+  )
+
+ari_df <- ari_df %>%
+  left_join(label_pos, by = "Method") %>%
+  mutate(label = paste0("ARI: ", round(ARI, 3)))
+
+# --- Plot ---
+ggplot(plot_long_2d, aes(x = x1, y = x2, color = Cluster)) +
+  geom_point(alpha = 0.75, size = 2.5) +
+  geom_text(
+    data = ari_df,
+    aes(x = x_pos, y = y_pos, label = label),
+    inherit.aes = FALSE,
+    hjust = 1.05,
+    vjust = 1.2,
+    size = 4,
+    color = "black"
+  ) +
+  facet_wrap(~ Method, ncol = 2) +
+  theme_minimal() +
+  labs(
+    x = expression(y[1]),
+    y = expression(y[2]),
+    color = "Cluster",
+    title = "Best Clusterings per Method (2D) with ARI vs Truth"
+  )
+
+
+```
+
+Still seems to work!
+
+3D visualization
+
+```{r}
+
+library(plotly)
+library(mclust)
+library(dplyr)
+
+stopifnot(ncol(y) == 3)
+
+# -----------------------------
+# Select best clusterings
+# -----------------------------
+best_ids <- c(
+  Truth    = NA,
+  MCMC     = which.min(results_df$dist_mcmc),
+  PostMean = which.min(results_df$dist_postmean),
+  MLE      = which.min(results_df$dist_mle),
+  Binder   = which.min(results_df$binder_ests),
+  VI       = which.min(results_df$vi_ests)
+)
+
+best_clusterings <- list(
+  Truth    = cluster_true,
+  MCMC     = clustering_matrix[best_ids["MCMC"], ],
+  PostMean = clustering_matrix[best_ids["PostMean"], ],
+  MLE      = clustering_matrix[best_ids["MLE"], ],
+  Binder   = clustering_matrix[best_ids["Binder"], ],
+  VI       = clustering_matrix[best_ids["VI"], ]
+)
+
+# -----------------------------
+# ARI vs truth
+# -----------------------------
+ari_vals <- sapply(
+  best_clusterings,
+  function(cl) adjustedRandIndex(cluster_true, cl)
+)
+
+# -----------------------------
+# Build 3D plots per method
+# -----------------------------
+plots_3d <- lapply(names(best_clusterings), function(m) {
+  
+  plot_ly(
+    x = y[,1],
+    y = y[,2],
+    z = y[,3],
+    color = factor(best_clusterings[[m]]),
+    colors = "Set1",
+    type = "scatter3d",
+    mode = "markers",
+    marker = list(size = 4)
+  ) %>%
+    layout(
+      title = paste0(
+        m,
+        " | ARI = ",
+        round(ari_vals[m], 3)
+      ),
+      scene = list(
+        xaxis = list(title = expression(y[1])),
+        yaxis = list(title = expression(y[2])),
+        zaxis = list(title = expression(y[3]))
+      ),
+      legend = list(title = list(text = "Cluster"))
+    )
+})
+
+plots_3d[[1]]
+
+# # -----------------------------
+# # Combine panels
+# # -----------------------------
+# subplot(
+#   plots_3d,
+#   nrows = 3,
+#   margin = 0.04,
+#   shareX = TRUE,
+#   shareY = TRUE,
+#   titleX = TRUE,
+#   titleY = TRUE
+# )
+
+
+```
+
+
+
+

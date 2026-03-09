@@ -1,0 +1,243 @@
+---
+title: "1D Gaussian Mixture Clustering Simulation Dashboard"
+subtitle: "Comparison of discrepancy measures and refinement strategies"
+author: "Alexander"
+date: "March 2026"
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    page-layout: full
+    fig-align: center
+    fig-width: 15           # ← wider default figures
+    fig-height: 9
+    embed-resources: true          # single self-contained file
+params:
+  results_dir: "results/simstudy/1D"
+  scenario_filter: !expr c("scen1", "scen2")
+  method_filter: !expr c("KS", "Pearson", "Wasserstein")
+  clusterwise_filter: !expr c(TRUE, FALSE)
+  version_filter: !expr c("grid", "quantile")
+  nsweet_min: 1
+  nsweet_max: 5
+  nms_min: 0
+  nms_max: 5
+  alpha0_min: 2
+  alpha0_max: 5
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(viridis)
+library(DT)
+library(patchwork)   # optional, for combining plots if needed
+
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = "center")
+
+
+
+```
+
+Simulation Scenarios
+Scenario 1 – Moderately overlapping components
+```{r}
+
+scen1 <- local({
+  set.seed(1)
+  N <- 100; K <- 3
+  mu_true <- c(-2, 0, 1)
+  sd_true <- c(1, 2, 1) * 0.2
+  w_true  <- c(0.3, 0.5, 0.2)
+  cl_true <- rep(1:K, round(w_true * N))
+  y <- numeric(N)
+  for (k in seq_len(K)) {
+    idx <- cl_true == k
+    y[idx] <- rnorm(sum(idx), mu_true[k], sd_true[k])
+  }
+  tibble(y = y, cluster = factor(cl_true))
+})
+
+scen1 |>
+  ggplot(aes(x = y)) +
+  geom_density(fill = "grey80", alpha = 0.4) +
+  geom_rug(aes(colour = cluster), sides = "b", length = unit(0.04, "npc")) +
+  geom_point(aes(y = 0, colour = cluster), 
+             position = position_jitter(height = 0.015), 
+             size = 1.6, alpha = 0.8) +
+  scale_colour_viridis_d(option = "plasma", end = 0.9) +
+  labs(title = "Scenario 1", subtitle = "K = 3, N = 100, unequal variances", 
+       x = "Observed values", y = "Density") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank())
+
+```
+
+Scenario 2 – Well-separated components
+
+```{r}
+
+scen2 <- local({
+  set.seed(2)
+  N <- 150; K <- 4
+  mu_true <- c(-4, -1, 1, 4)
+  sd_true <- rep(0.5, 4)
+  w_true  <- rep(0.25, 4)
+  cl_true <- rep(1:K, round(w_true * N))
+  y <- numeric(N)
+  for (k in seq_len(K)) {
+    idx <- cl_true == k
+    y[idx] <- rnorm(sum(idx), mu_true[k], sd_true[k])
+  }
+  tibble(y = y, cluster = factor(cl_true))
+})
+
+scen2 |>
+  ggplot(aes(x = y)) +
+  geom_density(fill = "grey80", alpha = 0.4) +
+  geom_rug(aes(colour = cluster), sides = "b", length = unit(0.04, "npc")) +
+  geom_point(aes(y = 0, colour = cluster), 
+             position = position_jitter(height = 0.015), 
+             size = 1.6, alpha = 0.8) +
+  scale_colour_viridis_d(option = "viridis", end = 0.9) +
+  labs(title = "Scenario 2", subtitle = "K = 4, N = 150, equal variances", 
+       x = "Observed values", y = "Density") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank())
+
+```
+
+
+```{r}
+
+results_dir <- params$results_dir
+files <- list.files(results_dir, pattern = "\\.rds$", full.names = TRUE)
+
+all_results <- map_dfr(files, readRDS) |>
+  mutate(
+    scenario_label = case_when(
+      scenario == "scen1" ~ "Scenario 1 (moderate overlap)",
+      scenario == "scen2" ~ "Scenario 2 (well separated)",
+      TRUE ~ scenario
+    ),
+    clusterwise_label = if_else(clusterwise, "Yes", "No")
+  )
+
+
+filtered <- all_results |>
+  filter(
+    scenario %in% params$scenario_filter,
+    method %in% params$method_filter,
+    clusterwise %in% params$clusterwise_filter,
+    version %in% params$version_filter,
+    n_sweet >= params$nsweet_min,
+    n_sweet <= params$nsweet_max,
+    n_ms >= params$nms_min,
+    n_ms <= params$nms_max,
+    alpha_0 >= params$alpha0_min,
+    alpha_0 <= params$alpha0_max
+  )
+filtered |>
+  group_by(scenario_label, method, clusterwise_label, version, n_sweet, n_ms, alpha_0) |>
+  summarise(
+    `N runs`       = n(),
+    `Mean ARI`     = mean(ARI, na.rm = TRUE) |> round(3),
+    `SD ARI`       = sd(ARI, na.rm = TRUE) |> round(3),
+    `Mean D`       = mean(final_D, na.rm = TRUE) |> round(4),
+    `Mean sweets`  = mean(n_accepted_sweets, na.rm = TRUE) |> round(1),
+    `Mean merges`  = mean(n_accepted_merges, na.rm = TRUE) |> round(1),
+    `Mean splits`  = mean(n_accepted_splits, na.rm = TRUE) |> round(1),
+    .groups = "drop"
+  ) |>
+  DT::datatable(
+    options = list(
+      pageLength = 12,
+      dom = "Bfrtip",
+      buttons = c("csv", "excel")
+    ),
+    extensions = "Buttons",
+    filter = "top",
+    caption = "Summary statistics (filtered)"
+  )
+```
+
+
+
+Visualisations
+1. ARI by method, clusterwise computation and n_sweet
+
+```{r}
+
+filtered |>
+  ggplot(aes(x = method, y = ARI, colour = factor(n_sweet))) +
+  geom_boxplot(alpha = 0.25, outlier.shape = NA) +
+  geom_point(position = position_jitterdodge(jitter.width = 0.22, dodge.width = 0.75),
+             size = 2.6, alpha = 0.9) +
+  facet_grid(scenario_label ~ clusterwise_label, labeller = label_both) +
+  #scale_colour_viridis_d(option = "C", name = "n_sweet") +
+  labs(
+    title = "Adjusted Rand Index by discrepancy measure, clusterwise aggregation and sweetening iterations",
+    y = "ARI", x = "Discrepancy measure"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank())
+
+```
+
+
+2. ARI by n_sweet, n_ms and method
+
+
+```{r}
+filtered |>
+  ggplot(aes(x = factor(n_sweet), y = ARI, colour = factor(n_ms))) +
+  geom_boxplot(alpha = 0.25, outlier.shape = NA) +
+  geom_point(position = position_jitterdodge(jitter.width = 0.22, dodge.width = 0.75),
+             size = 2.6, alpha = 0.9) +
+  facet_grid(scenario_label ~ method, labeller = label_both) +
+  #scale_colour_viridis_d(option = "plasma", name = "n_ms") +
+  labs(
+    title = "Adjusted Rand Index by sweetening iterations, merge-split cycles and method",
+    x = "n_sweet", y = "ARI"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank())
+```
+
+
+3. ARI by alpha₀, method and clusterwise
+
+```{r}
+
+filtered |>
+  ggplot(aes(x = factor(alpha_0), y = ARI, colour = method)) +
+  geom_boxplot(alpha = 0.25, outlier.shape = NA) +
+  geom_point(position = position_jitterdodge(jitter.width = 0.22, dodge.width = 0.75),
+             size = 2.6, alpha = 0.9) +
+  facet_grid(scenario_label ~ clusterwise_label, labeller = label_both) +
+  #scale_colour_viridis_d(option = "viridis", name = "Method") +
+  labs(
+    title = expression("Adjusted Rand Index by prior concentration" ~ alpha[0] ~ ", method and clusterwise computation"),
+    x = expression(alpha[0]), y = "ARI"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank())
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+

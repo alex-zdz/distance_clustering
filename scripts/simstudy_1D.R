@@ -143,19 +143,21 @@ run_one_config <- function(i, run_grid, prior_list) {
   row <- run_grid[i, ]
   set.seed(row$seed)
   
-  # Create output directory (safe to call multiple times)
   out_dir <- "results/simstudy/1D"
   if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
   
-  # Select scenario
+  # Select precomputed data & posterior
   if (row$scenario == "scen1") {
-    dat <- generate_scenario1()
+    y            <- scen1_data$y
+    cluster_true <- scen1_data$cluster_true
+    post         <- scen1_post
   } else {
-    dat <- generate_scenario2()
+    y            <- scen2_data$y
+    cluster_true <- scen2_data$cluster_true
+    post         <- scen2_post
   }
-  y            <- dat$y
-  cluster_true <- dat$cluster_true
-  K_true       <- dat$K
+  
+  K_true <- length(unique(cluster_true))   # or store it explicitly if preferred
   
   # AntMAN initialization
   post <- get_antman_posterior(y, K_true)
@@ -165,7 +167,7 @@ run_one_config <- function(i, run_grid, prior_list) {
     run_clustering(
       data               = y,
       clustering_matrix  = post$clustering_matrix,
-      posterior_params   = post$mix_post_draws,
+      posterior_draws   = post$mix_post_draws,
       prior_list         = prior_list,
       method             = row$method,
       clusterwise        = row$clusterwise,
@@ -233,12 +235,15 @@ run_one_config <- function(i, run_grid, prior_list) {
   
   # Save immediately – descriptive filename
   fname <- sprintf(
-    "sim_%s_%s_cw%s_v%s_ns%d_a0%d.rds",
+    "sim_%s_%s_clustw%s_ver%s_nsweet%d_nms%d_merge%d_split%d_a0%d.rds",
     row$scenario,
     row$method,
     ifelse(row$clusterwise, "T", "F"),
     row$version,
     row$n_sweet,
+    row$n_ms,
+    row$n_merge,
+    row$n_split,
     row$alpha_0
   )
   
@@ -248,7 +253,22 @@ run_one_config <- function(i, run_grid, prior_list) {
 
 # ---- 8. Run in parallel ----
 cl <- makeCluster(detectCores())
-clusterExport(cl, c("run_grid", "prior_list", "generate_scenario1", "generate_scenario2",
+
+
+# Pre-compute AntMAN fits for both scenarios (only once!)
+cat("Computing AntMAN posterior fits for both scenarios ...\n")
+
+scen1_data <- generate_scenario1()
+scen1_post <- get_antman_posterior(scen1_data$y, scen1_data$K)
+
+scen2_data <- generate_scenario2()
+scen2_post <- get_antman_posterior(scen2_data$y, scen2_data$K)
+
+
+clusterExport(cl, c("run_grid", "prior_list", 
+                    "scen1_data", "scen1_post",
+                    "scen2_data", "scen2_post",
+                    "generate_scenario1", "generate_scenario2",
                     "get_antman_posterior", "run_clustering", "run_one_config"))
 clusterEvalQ(cl, {
   library(AntMAN)
@@ -259,6 +279,8 @@ clusterEvalQ(cl, {
   source("src/mixture_utils.R")
   source("src/distances.R")
 })
+
+
 
 pboptions(type = "timer")
 cat("Starting parallel run (", nrow(run_grid), " configurations) ...\n")

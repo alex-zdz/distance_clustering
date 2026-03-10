@@ -27,7 +27,7 @@ compute_distance <- function(data,
                              method      = c("KS", "Pearson", "Wasserstein"),
                              clusterwise = FALSE,
                              c_alloc     = NULL,
-                             L           = 100,
+                             L           = 20,
                              version     = c("grid", "quantile"),
                              M           = 2000) {
   
@@ -331,77 +331,77 @@ Pearson_mixture_distance <- function(data, weight, mean, sig2) {
 #####################
 # Sliced Wasserstein
 #####################
-# 
-# generateTheta <- function(L, d) {
-#   theta <- matrix(0, nrow = L, ncol = d)
-#   
-#   # First vector: uniform on sphere
-#   th_l <- runif(d)
-#   th_l <- th_l / sqrt(sum(th_l^2))
-#   theta[1, ] <- th_l
-#   
-#   # Remaining vectors
-#   for (i in 2:L) {
-#     th_l <- rnorm(d)
-#     th_l <- th_l / sqrt(sum(th_l^2))
-#     
-#     m <- max(abs(theta[1:(i - 1), ] %*% th_l))
-#     
-#     while (m > 0.97) {
-#       th_l <- rnorm(d)
-#       th_l <- th_l / sqrt(sum(th_l^2))
-#       m <- max(abs(theta[1:(i - 1), ] %*% th_l))
-#     }
-#     theta[i, ] <- th_l
-#   }
-#   theta
-# }
-# 
-# 
-# generate_theta_normal <- function(L, d) {
-#   theta <- matrix(rnorm(L * d), nrow = L, ncol = d)
-#   # Normalize each row to have length 1
-#   theta <- theta / sqrt(rowSums(theta^2))
-#   theta
-# }
-# 
-# Wasserstein_1D <- function(I0, I1, p = 2) {
-#   stopifnot(length(I0) == length(I1))
-#   
-#   eps <- 1e-7
-#   
-#   # Ensure strict positivity
-#   I0 <- I0 + eps
-#   I1 <- I1 + eps
-#   
-#   # Normalize to sum to 1 - both pdfs have already been normalized, so this step is redundant here
-#   I0 <- I0 / sum(I0)
-#   I1 <- I1 / sum(I1)
-#   
-#   # Compute CDFs
-#   J0 <- cumsum(I0)
-#   J1 <- cumsum(I1)
-#   
-#   # Grid
-#   x       <- seq_along(I0) - 1
-#   xtilde  <- seq(0, 1, length.out = length(I0))
-#   
-#   # Inverse CDF sampling (pseudo-quantiles)
-#   XI0 <- approx(J0, x, xout = xtilde, rule = 2)$y
-#   XI1 <- approx(J1, x, xout = xtilde, rule = 2)$y
-#   
-#   # Displacement field u(x)
-#   u <- approx(XI0, XI0 - XI1, xout = x, rule = 2)$y
-#   
-#   # # Transport map f(x) = x - u(x)
-#   # f <- x - u
-#   # 
-#   # # Potential phi(x)
-#   # phi <- cumsum(u / length(I0))
-#   # phi <- phi - mean(phi)
-#   
-#   # p-Wasserstein distance
-#   Wp <- (mean((abs(u)^p) * I0))^(1/p)
-#   
-#   Wp
-# }
+
+generateTheta <- function(L, d) {
+  theta <- matrix(0, nrow = L, ncol = d)
+
+  # First vector: uniform on sphere
+  th_l <- runif(d)
+  th_l <- th_l / sqrt(sum(th_l^2))
+  theta[1, ] <- th_l
+
+  # Remaining vectors
+  for (i in 2:L) {
+    th_l <- rnorm(d)
+    th_l <- th_l / sqrt(sum(th_l^2))
+
+    m <- max(abs(theta[1:(i - 1), ] %*% th_l))
+
+    while (m > 0.97) {
+      th_l <- rnorm(d)
+      th_l <- th_l / sqrt(sum(th_l^2))
+      m <- max(abs(theta[1:(i - 1), ] %*% th_l))
+    }
+    theta[i, ] <- th_l
+  }
+  theta
+}
+
+
+generate_theta_normal <- function(L, d) {
+  theta <- matrix(rnorm(L * d), nrow = L, ncol = d)
+  # Normalize each row to have length 1
+  theta <- theta / sqrt(rowSums(theta^2))
+  theta
+}
+
+Wasserstein_1D <- function(I0, I1, p = 2) {
+  stopifnot(length(I0) == length(I1))
+
+  eps <- 1e-7
+
+  # Ensure strict positivity
+  I0 <- I0 + eps
+  I1 <- I1 + eps
+
+  # Normalize to sum to 1 - both pdfs have already been normalized, so this step is redundant here
+  I0 <- I0 / sum(I0)
+  I1 <- I1 / sum(I1)
+
+  # Compute CDFs
+  J0 <- cumsum(I0)
+  J1 <- cumsum(I1)
+
+  # Grid
+  x       <- seq_along(I0) - 1
+  xtilde  <- seq(0, 1, length.out = length(I0))
+
+  # Inverse CDF sampling (pseudo-quantiles)
+  XI0 <- approx(J0, x, xout = xtilde, rule = 2)$y
+  XI1 <- approx(J1, x, xout = xtilde, rule = 2)$y
+
+  # Displacement field u(x)
+  u <- approx(XI0, XI0 - XI1, xout = x, rule = 2)$y
+
+  # # Transport map f(x) = x - u(x)
+  # f <- x - u
+  #
+  # # Potential phi(x)
+  # phi <- cumsum(u / length(I0))
+  # phi <- phi - mean(phi)
+
+  # p-Wasserstein distance
+  Wp <- (mean((abs(u)^p) * I0))^(1/p)
+
+  Wp
+}

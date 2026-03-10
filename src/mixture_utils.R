@@ -255,7 +255,7 @@ get_mixture_params <- function(
     K <- max(clustering)
     
     weights <- numeric(K)
-    means   <- if (D == 1) numeric(K) else matrix(NA, nrow = K, ncol = D)
+    means   <- if (D == 1) numeric(K) else vector("list", K) #matrix(NA, nrow = K, ncol = D)
     vars    <- if (D == 1) numeric(K) else vector("list", K)
     
     # -------------------------------------------------
@@ -307,7 +307,7 @@ get_mixture_params <- function(
         
       } else {
         
-        means[k, ] <- colMeans(y_k)
+        means[[k]] <- colMeans(y_k)
         
         # ---------------------------------------------
         # OLD VERSION (kept for reference)

@@ -24,7 +24,6 @@ source("../src/mixture_utils.R")
 source("../src/distances.R")
 ```
 
-
 ```{r}
 # ---- 3. Data generation functions ----
 generate_scenario1 <- function() {
@@ -87,7 +86,6 @@ get_antman_posterior <- function(y, K_true) {
 
 ```
 
-
 ```{r}
 
 scen1_data <- generate_scenario1()
@@ -149,7 +147,6 @@ dim(run_grid)
 
 
 ```
-
 
 ```{r}
 
@@ -267,4 +264,3 @@ for(i in seq_len(nrow(run_grid))){
 
 
 ```
-

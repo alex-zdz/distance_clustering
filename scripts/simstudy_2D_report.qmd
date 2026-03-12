@@ -1,0 +1,285 @@
+---
+title: "2D Gaussian Mixture Clustering Simulation Dashboard"
+subtitle: "Evaluation of Wasserstein-based discrepancy measures and refinement strategies"
+author: "Alexander"
+date: "March 2026"
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: true
+    code-tools: true
+    page-layout: full
+    fig-align: center
+    fig-width: 15
+    fig-height: 9
+    embed-resources: true
+params:
+  results_dir: "results/simstudy/2D"
+  scenario_filter: !expr c("scen1", "scen2")
+  method_filter: !expr c("Wasserstein")
+  clusterwise_filter: !expr c(TRUE, FALSE)
+  nsweet_min: 1
+  nsweet_max: 5
+  nms_min: 0
+  nms_max: 5
+  nu0_min: 4
+  nu0_max: 7
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(viridis)
+library(DT)
+library(patchwork)
+library(salso)
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = "center")
+```
+
+# Scenarios
+
+```{r}
+# Scenario 1 – moderate overlap
+scen1 <- local({
+  set.seed(1)
+  N <- 100; K <- 3
+  mu_true <- matrix(c(-2, 0, 0, 0, 2, 0), nrow = 3, byrow = TRUE)
+  Sigma_true <- lapply(1:3, \(i) diag(2)*0.2)
+  w_true <- c(0.3, 0.4, 0.3)
+  cl_true <- sample(1:K, N, TRUE, w_true)
+  y <- matrix(NA, N, 2)
+  for (k in 1:K) {
+    idx <- cl_true == k
+    y[idx,] <- MASS::mvrnorm(sum(idx), mu_true[k,], Sigma_true[[k]])
+  }
+  tibble(y1 = y[,1], y2 = y[,2], cluster = factor(cl_true))
+})
+
+p1 <- scen1 |>
+  ggplot(aes(x = y1, y = y2, colour = cluster)) +
+  geom_point(size = 2.2, alpha = 0.85) +
+  scale_colour_viridis_d(option = "plasma", end = 0.9) +
+  labs(title = "Scenario 1", subtitle = "K = 3, N = 100, moderate overlap") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank())
+
+# Scenario 2 – well separated
+scen2 <- local({
+  set.seed(2)
+  N <- 150; K <- 4
+  mu_true <- matrix(c(-4, 0, -1, 0, 1, 0, 4, 0), nrow = 4, byrow = TRUE)
+  Sigma_true <- lapply(1:4, \(i) diag(2)*0.5)
+  w_true <- rep(0.25, 4)
+  cl_true <- sample(1:K, N, TRUE, w_true)
+  y <- matrix(NA, N, 2)
+  for (k in 1:K) {
+    idx <- cl_true == k
+    y[idx,] <- MASS::mvrnorm(sum(idx), mu_true[k,], Sigma_true[[k]])
+  }
+  tibble(y1 = y[,1], y2 = y[,2], cluster = factor(cl_true))
+})
+
+p2 <- scen2 |>
+  ggplot(aes(x = y1, y = y2, colour = cluster)) +
+  geom_point(size = 2.2, alpha = 0.85) +
+  scale_colour_viridis_d(option = "viridis", end = 0.9) +
+  labs(title = "Scenario 2", subtitle = "K = 4, N = 150, well separated") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank())
+
+cowplot::plot_grid(p1, p2, ncol = 2)
+
+```
+
+
+
+```{r}
+results_dir <- params$results_dir
+
+# ── 1. Load only the simulation result files ────────────────────────────────
+files <- list.files(results_dir, pattern = "^sim_.*\\.rds$", full.names = TRUE)
+
+all_results <- map_dfr(files, readRDS) |>
+  mutate(
+    scenario_label = case_when(
+      scenario == "scen1" ~ "Scenario 1 (moderate overlap)",
+      scenario == "scen2" ~ "Scenario 2 (well separated)",
+      TRUE ~ scenario
+    ),
+    clusterwise_label = if_else(clusterwise, "Yes (clusterwise)", "No (global mixture)")
+  )
+
+# ── 2. Load posterior objects and true labels once ───────────────────────────
+scen1_post <- readRDS(file.path(results_dir, "scen1_post.rds"))
+scen2_post <- readRDS(file.path(results_dir, "scen2_post.rds"))
+
+# True labels (you already have them in scen1_data / scen2_data, but reload if needed)
+scen1_true <- readRDS(file.path(results_dir, "scen1_data.rds"))$cluster_true
+scen2_true <- readRDS(file.path(results_dir, "scen2_data.rds"))$cluster_true
+
+# ── 3. Compute consensus clusterings and ARI against truth — once per scenario ─
+binder_scen1 <- salso(scen1_post$clustering_matrix, loss = binder())
+vi_scen1     <- salso(scen1_post$clustering_matrix, loss = VI())
+ari_binder_scen1 <- adjustedRandIndex(binder_scen1, scen1_true)
+ari_vi_scen1     <- adjustedRandIndex(vi_scen1,     scen1_true)
+
+binder_scen2 <- salso(scen2_post$clustering_matrix, loss = binder())
+vi_scen2     <- salso(scen2_post$clustering_matrix, loss = VI())
+ari_binder_scen2 <- adjustedRandIndex(binder_scen2, scen2_true)
+ari_vi_scen2     <- adjustedRandIndex(vi_scen2,     scen2_true)
+
+# ── 4. Attach these fixed values to every row in filtered ────────────────────
+filtered <- all_results |>
+  filter(
+    scenario %in% params$scenario_filter,
+    clusterwise %in% params$clusterwise_filter,
+    n_sweet >= params$nsweet_min,
+    n_sweet <= params$nsweet_max,
+    n_ms >= params$nms_min,
+    n_ms <= params$nms_max,
+    nu_0 >= params$nu0_min,
+    nu_0 <= params$nu0_max
+  ) |>
+  mutate(
+    ARI_Binder_consensus = if_else(scenario == "scen1", ari_binder_scen1, ari_binder_scen2),
+    ARI_VI_consensus     = if_else(scenario == "scen1", ari_vi_scen1,     ari_vi_scen2)
+  )
+
+cat("Loaded", nrow(all_results), "configurations.\n")
+cat("Computed consensus ARIs vs truth: ",
+    "Scen1 Binder =", round(ari_binder_scen1, 3), 
+    "| VI =", round(ari_vi_scen1, 3), "\n",
+    "Scen2 Binder =", round(ari_binder_scen2, 3), 
+    "| VI =", round(ari_vi_scen2, 3), "\n")
+
+```
+
+
+```{r}
+
+
+filtered |>
+  group_by(scenario_label, clusterwise_label, n_sweet, n_ms, nu_0) |>
+  summarise(
+    `N runs`                  = n(),
+    `Mean ARI (vs truth)`     = mean(ARI, na.rm = TRUE) |> round(3),
+    `SD ARI (vs truth)`       = sd(ARI, na.rm = TRUE) |> round(3),
+    `ARI vs Binder consensus` = first(ARI_Binder_consensus) |> round(3),
+    `ARI vs VI consensus`     = first(ARI_VI_consensus) |> round(3),
+    `Mean D`                  = mean(final_D, na.rm = TRUE) |> round(4),
+    `Mean sweets`             = mean(n_accepted_sweets, na.rm = TRUE) |> round(1),
+    `Mean merges`             = mean(n_accepted_merges, na.rm = TRUE) |> round(1),
+    `Mean splits`             = mean(n_accepted_splits, na.rm = TRUE) |> round(1),
+    .groups = "drop"
+  ) |>
+  DT::datatable(
+    options = list(
+      pageLength = 12,
+      dom = "Bfrtip",
+      buttons = c("csv", "excel")
+    ),
+    extensions = "Buttons",
+    filter = "top",
+    caption = "Summary statistics – filtered results (including consensus ARI)"
+  )
+
+
+```
+
+
+
+## Visualisations
+
+### Adjusted Rand Index vs. true labels
+
+```{r}
+
+filtered |>
+  ggplot(aes(x = factor(n_sweet), y = ARI, colour = clusterwise_label)) +
+  geom_boxplot(alpha = 0.25, outlier.shape = NA) +
+  geom_point(position = position_jitterdodge(jitter.width = 0.22, dodge.width = 0.75),
+             size = 2.6, alpha = 0.9) +
+  facet_wrap(~ scenario_label, ncol = 2) +
+  scale_colour_viridis_d(option = "C", name = "Clusterwise Wasserstein") +
+  labs(
+    title = "Adjusted Rand Index vs. true clustering",
+    subtitle = "Higher is better — direct comparison to ground truth",
+    x = "Number of sweetening iterations (n_sweet)",
+    y = "Adjusted Rand Index (ARI)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank())
+
+```
+
+## Visualisations
+
+### Adjusted Rand Index vs. true labels + posterior consensus benchmarks
+
+
+
+
+```{r}
+
+# Prepare reference lines (one value per scenario × consensus type)
+ref_lines <- filtered |>
+  distinct(scenario_label, ARI_Binder_consensus, ARI_VI_consensus) |>
+  pivot_longer(
+    cols = c(ARI_Binder_consensus, ARI_VI_consensus),
+    names_to = "consensus_type",
+    values_to = "consensus_ARI"
+  ) |>
+  mutate(
+    consensus_type = case_when(
+      consensus_type == "ARI_Binder_consensus" ~ "Binder consensus",
+      consensus_type == "ARI_VI_consensus"     ~ "VI consensus"
+    )
+  )
+
+filtered |>
+  ggplot(aes(x = factor(n_sweet), y = ARI, colour = clusterwise_label)) +
+  geom_boxplot(alpha = 0.25, outlier.shape = NA) +
+  geom_point(position = position_jitterdodge(jitter.width = 0.22, dodge.width = 0.75),
+             size = 2.6, alpha = 0.9) +
+  
+  # Horizontal reference lines: both dashed, same non-black color
+  geom_hline(
+    data = ref_lines,
+    aes(yintercept = consensus_ARI, linetype = consensus_type),
+    colour = "#4B6584",           # muted blue-gray (change to any other hex if desired)
+    linewidth = 0.9,
+    linetype = "dashed"           # both lines dashed
+  ) +
+  
+  facet_wrap(~ scenario_label, ncol = 1, labeller = label_wrap_gen(multi_line = TRUE)) +
+  
+  scale_colour_viridis_d(option = "C", name = "Clusterwise Wasserstein") +
+  scale_linetype_manual(
+    values = c("Binder consensus" = "dashed", "VI consensus" = "dashed"),
+    name = "Posterior consensus benchmark"
+  ) +
+  
+  labs(
+    title = "Adjusted Rand Index vs. true clustering",
+    subtitle = "Boxplots: method performance | Dashed lines: ARI of SALSO consensus vs. truth",
+    x = "Number of sweetening iterations (n_sweet)",
+    y = "Adjusted Rand Index (ARI)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "vertical",
+    legend.margin = margin(t = -10),
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(size = 12, face = "bold")
+  )
+
+```
+
+
+
+
+

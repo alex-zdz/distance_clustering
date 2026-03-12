@@ -40,7 +40,6 @@ library(patchwork)   # optional, for combining plots if needed
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = "center")
 
 
-
 ```
 
 Simulation Scenarios

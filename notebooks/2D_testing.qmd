@@ -1,0 +1,270 @@
+---
+title: "2D testing"
+format: html
+editor: visual
+---
+
+```{r}
+# =============================================================================
+# Simulation study – 2D Gaussian mixtures – evaluating search-based clustering
+# =============================================================================
+# Purpose: Analyze the clustering algorithm for higher dimensional data
+# using the sliced Wasserstein distsance
+# Date: March 2026
+
+rm(list = ls())
+library(AntMAN)
+library(mclust) # adjustedRandIndex
+library(salso) # binder, VI
+library(tidyverse)
+
+# ---- 2. Source the three main function files ----
+source("../src/search_algorithm.R")
+source("../src/mixture_utils.R")
+source("../src/distances.R")
+```
+
+
+```{r}
+# ---- 3. Data generation functions ----
+generate_scenario1 <- function() {
+  set.seed(1)
+  generate_mixture_data(
+    N = 100,
+    K = 3,
+    dim = 2,
+    mu_true = matrix(c(-2, 0, 0, 0, 2, 0), nrow = 3, byrow = TRUE),
+    Sigma_true = lapply(1:3, function(i) diag(c(0.2, 0.2)))
+  )
+}
+generate_scenario2 <- function() {
+  set.seed(2)
+  generate_mixture_data(
+    N = 150,
+    K = 4,
+    dim = 2,
+    mu_true = matrix(c(-4, 0, -1, 0, 1, 0, 4, 0), nrow = 4, byrow = TRUE),
+    Sigma_true = lapply(1:4, function(i) diag(c(0.4, 0.4)))
+  )
+}
+# ---- 4. AntMAN posterior draws ----
+get_antman_posterior <- function(y, K_true) {
+  D <- ncol(y)
+  alpha_0 <- 1
+  kappa_0 <- 0.01
+  nu_0 <- D + 2
+  S_0 <- diag(D) * 2
+  
+  n_iter <- 20000
+  burn_in <- n_iter / 4
+  thin <- 10
+  
+  mixture_mvn_params <- AM_mix_hyperparams_multinorm(
+    mu0 = rep(0, D), ka0 = kappa_0, nu0 = nu_0, Lam0 = S_0
+  )
+  
+  mcmc_params <- AM_mcmc_parameters(
+    niter = n_iter, burnin = burn_in, thin = thin, verbose = 0
+  )
+  
+  components_prior <- AM_mix_components_prior_pois(Lambda = K_true)
+  
+  mix_post_draws <- AM_mcmc_fit(
+    y = y,
+    mix_kernel_hyperparams = mixture_mvn_params,
+    mix_components_prior = components_prior,
+    mcmc_parameters = mcmc_params
+  )
+  
+  eam <- AM_clustering(mix_post_draws)
+  clustering_matrix <- eam + 1L
+  
+  list(
+    mix_post_draws = mix_post_draws,
+    clustering_matrix = clustering_matrix
+  )
+}
+
+```
+
+
+```{r}
+
+scen1_data <- generate_scenario1()
+scen1_post <- get_antman_posterior(scen1_data$data, scen1_data$K)
+scen2_data <- generate_scenario2()
+scen2_post <- get_antman_posterior(scen2_data$data, scen2_data$K)
+
+# ---- 5. Fixed prior list ----
+prior_list <- list(
+  alpha_0 = 1,
+  kappa_0 = 0.01,
+  mu_0 = c(0, 0),
+  nu_0 = 4,
+  S_0 = diag(2) * 5
+)
+
+# ---- 6. Parameter grid ----
+methods <- "Wasserstein"
+clusterwise <- c(FALSE, TRUE)
+versions <- c("grid", "quantile")
+run_grid <- expand.grid(
+  method = methods,
+  clusterwise = clusterwise,
+  version = versions,
+  n_sweet = c(1, 3),
+  n_ms = c(0, 3),
+  n_merge = 5,
+  n_split = 5,
+  nu_0 = c(4, 7),  # Adapted for multivariate prior df
+  scenario = c("scen1", "scen2"),
+  seed = 1,
+  stringsAsFactors = FALSE
+) |>
+  filter(
+    !(method == "Wasserstein" & clusterwise == TRUE & version == "grid")
+  ) |>
+  filter(
+    !(method == "Wasserstein" & clusterwise == FALSE & version == "quantile")
+  )
+dim(run_grid)
+
+methods <- "Wasserstein"
+clusterwise <- c(FALSE, TRUE)
+#versions <- c("grid", "quantile")
+run_grid <- expand.grid(
+  method = methods,
+  clusterwise = clusterwise,
+  version = versions,
+  n_sweet = c(1),
+  n_ms = c(1),
+  n_merge = 5,
+  n_split = 5,
+  nu_0 = c(4, 7),  # Adapted for multivariate prior df
+  scenario = c("scen1"), #, "scen2"),
+  seed = 1,
+  stringsAsFactors = FALSE
+) 
+dim(run_grid)
+
+
+```
+
+
+```{r}
+
+for(i in seq_len(nrow(run_grid))){
+  i = 17
+  row <- run_grid[i, ]
+  set.seed(row$seed)
+  
+  out_dir <- "results/simstudy/2D"
+  if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+  
+  # Select precomputed data & posterior
+  if (row$scenario == "scen1") {
+    scen_data <- scen1_data
+    post <- scen1_post
+  } else {
+    scen_data <- scen2_data
+    post <- scen2_post
+  }
+  
+  y <- scen_data$data
+  cluster_true <- scen_data$cluster_true
+  K_true <- length(unique(cluster_true))
+  
+  # Override nu_0 in prior_list for this config
+  prior_list$nu_0 <- row$nu_0
+  
+# Run clustering (note: alpha_0 replaced conceptually by nu_0, but function uses alpha_0 for 1D; we pass nu_0 via prior_list for consistency, though mle doesn't use it)
+  fit <- #tryCatch(
+    run_clustering(
+      data = y,
+      clustering_matrix = post$clustering_matrix,
+      posterior_draws = post$mix_post_draws,
+      prior_list = prior_list,
+      method = row$method,
+      clusterwise = row$clusterwise,
+      estimator = "mle",
+      n_runs = 1,
+      n_sweet = row$n_sweet,
+      tol = 1e-10,
+      n_ms = row$n_ms,
+      n_merge = row$n_merge,
+      n_split = row$n_split,
+      version = row$version,
+      M = 2000,
+      alpha_0 = row$nu_0  # Repurposed as nu_0 equivalent for calls; adjust source if needed
+    )
+  #,
+  #   error = function(e) {
+  #     message(sprintf("Config %d failed: %s", i, e$message))
+  #     return(NULL)
+  #   }
+  # )
+  
+  if (is.null(fit)) return(NULL)
+  
+  # Best run
+  best_idx <- which.min(fit$distance_record)
+  best_D <- fit$distance_record[best_idx]
+  best_c <- fit$final_clustering
+  
+  # ARI vs truth
+  ari <- adjustedRandIndex(best_c, cluster_true)
+  
+  # Posterior-based summaries
+  binder_clust <- salso(post$clustering_matrix, loss = binder())
+  vi_clust <- salso(post$clustering_matrix, loss = VI())
+  ari_binder <- adjustedRandIndex(binder_clust, cluster_true)
+  ari_vi <- adjustedRandIndex(vi_clust, cluster_true)
+  
+  # Counts
+  n_sweet_acc <- fit$total_accepted_sweets[best_idx]
+  n_merge_acc <- if ("total_accepted_merges" %in% names(fit)) fit$total_accepted_merges[best_idx] else 0L
+  n_split_acc <- if ("total_accepted_splits" %in% names(fit)) fit$total_accepted_splits[best_idx] else 0L
+  
+  # Create result tibble
+  res <- tibble(
+    scenario = row$scenario,
+    method = row$method,
+    clusterwise = row$clusterwise,
+    version = row$version,
+    n_sweet = row$n_sweet,
+    n_ms = row$n_ms,
+    n_merge = row$n_merge,
+    n_split = row$n_split,
+    nu_0 = row$nu_0,
+    seed = row$seed,
+    final_D = best_D,
+    ARI = ari,
+    ARI_Binder = ari_binder,
+    ARI_VI = ari_vi,
+    n_accepted_sweets = n_sweet_acc,
+    n_accepted_merges = n_merge_acc,
+    n_accepted_splits = n_split_acc,
+    final_clust = list(best_c),
+    .rows = 1L
+  )
+  
+  # Save immediately – descriptive filename
+  fname <- sprintf(
+    "sim_%s_%s_clustw%s_ver%s_nsweet%d_nms%d_merge%d_split%d_nu0%d.rds",
+    row$scenario,
+    row$method,
+    ifelse(row$clusterwise, "T", "F"),
+    row$version,
+    row$n_sweet,
+    row$n_ms,
+    row$n_merge,
+    row$n_split,
+    row$nu_0
+  )
+  
+}
+
+
+
+```
+

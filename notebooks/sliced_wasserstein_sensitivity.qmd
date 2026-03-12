@@ -1114,8 +1114,6 @@ compute_distances <- function(
   dist
 }
 
-
-
 ```
 
 ```{r}

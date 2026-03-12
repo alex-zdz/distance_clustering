@@ -13,13 +13,14 @@ fulfill_gap_label <- function(c_vec) {
 initialize_clustering <- function(data,
                                   clustering_matrix,
                                   posterior_params = NULL,
-                                  prior_list = NULL,
-                                  method = "KS",
-                                  clusterwise = FALSE,
-                                  estimator = "posterior",
-                                  version = "grid",          # new – only relevant for Wasserstein
-                                  M = 2000,
-                                  alpha_0 = 2) {                # new – only relevant for Wasserstein
+                                  prior_list       = NULL,
+                                  method           = "KS",
+                                  clusterwise      = FALSE,
+                                  estimator        = "posterior",
+                                  M                = 2000,
+                                  alpha_0          = 2,
+                                  nu_0             = 2,
+                                  theta            = NULL) {
   
   estimator <- match.arg(estimator, choices = c("posterior", "mle"))
   n_candidates <- nrow(clustering_matrix)
@@ -34,11 +35,12 @@ initialize_clustering <- function(data,
       var_i <- posterior_params$var_post[[i]]
     } else {
       param <- get_mixture_params(
-        clustering    = c_i,
+        clustering = c_i,
         data       = data,
         estimator  = estimator,
         prior_list = prior_list,
-        alpha_0    = alpha_0
+        alpha_0    = alpha_0,
+        nu_0       = nu_0
       )
       w_i   <- param$weight
       mu_i  <- param$mean
@@ -53,8 +55,8 @@ initialize_clustering <- function(data,
       method     = method,
       clusterwise = clusterwise,
       c_alloc    = if (clusterwise) c_i else NULL,
-      version    = version,
-      M          = M
+      M          = M,
+      theta      = theta
     )
   }
   
@@ -69,10 +71,15 @@ initialize_clustering <- function(data,
 
 # Sweetening Phase
 sweetening <- function(c_current, data, prior_list, D_current,
-                       n_sweet = 100, tol = 1e-10,
-                       method = "KS", clusterwise = FALSE,
-                       estimator = c("posterior", "mle"),
-                       version = "grid", M = 2000, alpha_0 = 2) {
+                       n_sweet     = 100,
+                       tol         = 1e-10,
+                       method      = "KS",
+                       clusterwise = FALSE,
+                       estimator   = c("posterior", "mle"),
+                       M           = 2000,
+                       alpha_0     = 2,
+                       nu_0        = 2,
+                       theta       = NULL) {
   
   estimator <- match.arg(estimator)
   run_sweet <- 0
@@ -91,9 +98,10 @@ sweetening <- function(c_current, data, prior_list, D_current,
         
         param <- get_mixture_params(
           c_candidate, data,
-          estimator = estimator,
+          estimator  = estimator,
           prior_list = prior_list,
-          alpha_0 = alpha_0
+          alpha_0    = alpha_0,
+          nu_0       = nu_0
         )
         
         losses[k] <- compute_distance(
@@ -104,8 +112,8 @@ sweetening <- function(c_current, data, prior_list, D_current,
           method     = method,
           clusterwise = clusterwise,
           c_alloc    = if (clusterwise) c_candidate else NULL,
-          version    = version,
-          M          = M
+          M          = M,
+          theta      = theta
         )
       }
       
@@ -132,14 +140,16 @@ merge_split_phase <- function(c_current,
                               D_current,
                               data,
                               prior_list,
-                              n_ms = 1,
-                              n_merge = 1,
-                              n_split = 1,
-                              method = "KS",
+                              n_ms     = 1,
+                              n_merge  = 1,
+                              n_split  = 1,
+                              method   = "KS",
                               clusterwise = FALSE,
-                              estimator = c("posterior", "mle"),
-                              version = "grid",
-                              M = 2000) {
+                              estimator   = c("posterior", "mle"),
+                              M        = 2000,
+                              alpha_0  = 2,
+                              nu_0     = 2,
+                              theta    = NULL) {
   
   estimator <- match.arg(estimator)
   n_cluster <- max(c_current)
@@ -158,7 +168,8 @@ merge_split_phase <- function(c_current,
         c_merge[c_merge == merge_pairs[j, 1]] <- merge_pairs[j, 2]
         c_merge <- fulfill_gap_label(c_merge)
         
-        param <- get_mixture_params(c_merge, data, estimator, prior_list)
+        param <- get_mixture_params(c_merge, data, estimator, prior_list,
+                                    alpha_0 = alpha_0, nu_0 = nu_0)
         
         D_new <- compute_distance(
           data       = data,
@@ -168,8 +179,8 @@ merge_split_phase <- function(c_current,
           method     = method,
           clusterwise = clusterwise,
           c_alloc    = if (clusterwise) c_merge else NULL,
-          version    = version,
-          M          = M
+          M          = M,
+          theta      = theta
         )
         
         if (D_new < D_current) {
@@ -192,7 +203,9 @@ merge_split_phase <- function(c_current,
       
       c_split <- fulfill_gap_label(c_split)
       
-      param <- get_mixture_params(c_split, data, estimator, prior_list)
+      param <- get_mixture_params(c_split, data, estimator, prior_list,
+                                  alpha_0 = alpha_0, nu_0 = nu_0)
+      
       D_new <- compute_distance(
         data       = data,
         weight     = param$weight,
@@ -201,8 +214,8 @@ merge_split_phase <- function(c_current,
         method     = method,
         clusterwise = clusterwise,
         c_alloc    = if (clusterwise) c_split else NULL,
-        version    = version,
-        M          = M
+        M          = M,
+        theta      = theta
       )
       
       if (D_new < D_current) {
@@ -215,9 +228,9 @@ merge_split_phase <- function(c_current,
   }
   
   list(
-    c_current = c_current,
-    D_current = D_current,
-    n_cluster = n_cluster,
+    c_current      = c_current,
+    D_current      = D_current,
+    n_cluster      = n_cluster,
     n_merge_accept = n_merge_accept,
     n_split_accept = n_split_accept
   )
@@ -238,15 +251,34 @@ run_clustering <- function(data,
                            n_ms        = 1,
                            n_merge     = 1,
                            n_split     = 1,
-                           version     = "grid",    # new
                            M           = 2000,
-                           alpha_0     = 2
-                           ) {    # new
+                           alpha_0     = 2,
+                           nu_0        = 2,
+                           L           = 1000,
+                           theta       = NULL) {
   
   estimator <- match.arg(estimator)
   
   posterior_params <- if (estimator == "posterior")
     prepare_AM_posterior_params(posterior_draws) else NULL
+  
+  # ────────────────────────────────────────────────────────────────
+  # Generate fixed projection directions only when needed
+  # ────────────────────────────────────────────────────────────────
+  d <- if (is.null(dim(data))) 1L else ncol(data)
+  
+  if (method == "Wasserstein" && d > 1L) {
+    if (is.null(theta)) {
+      theta <- generate_theta_normal(L = L, d = d)
+      # Optional safety check
+      stopifnot(nrow(theta) == L)
+      stopifnot(all(abs(rowSums(theta^2) - 1) < 1e-8))
+    } else {
+      L <- nrow(theta)  # override with supplied matrix size
+    }
+  } else {
+    theta <- NULL
+  }
   
   c_record               <- matrix(NA, n_runs, ncol(clustering_matrix))
   distance_record        <- numeric(n_runs)
@@ -258,7 +290,8 @@ run_clustering <- function(data,
     data, clustering_matrix,
     posterior_params, prior_list,
     method, clusterwise, estimator,
-    version = version, M = M, alpha_0 = alpha_0
+    M = M, alpha_0 = alpha_0, nu_0 = nu_0,
+    theta = theta
   )
   
   c_current <- init$c_current
@@ -269,7 +302,8 @@ run_clustering <- function(data,
     sweet <- sweetening(
       c_current, data, prior_list, D_current,
       n_sweet, tol, method, clusterwise, estimator,
-      version = version, M = M, alpha_0 = alpha_0
+      M = M, alpha_0 = alpha_0, nu_0 = nu_0,
+      theta = theta
     )
     
     ms <- merge_split_phase(
@@ -277,21 +311,21 @@ run_clustering <- function(data,
       data, prior_list,
       n_ms, n_merge, n_split,
       method, clusterwise, estimator,
-      version = version, M = M
+      M = M, alpha_0 = alpha_0, nu_0 = nu_0,
+      theta = theta
     )
     
     c_current <- ms$c_current
     D_current <- ms$D_current
     
-    c_record[run, ]             <- c_current 
+    c_record[run, ]             <- c_current
     distance_record[run]        <- D_current
     total_accepted_merges[run]  <- ms$n_merge_accept
     total_accepted_splits[run]  <- ms$n_split_accept
     total_accepted_sweets[run]  <- sweet$n_sweet
-    
   }
   
-  final_clustering <- c_record[which.min(distance_record), ] 
+  final_clustering <- c_record[which.min(distance_record), ]
   
   list(
     final_clustering           = final_clustering,
@@ -302,4 +336,3 @@ run_clustering <- function(data,
     total_accepted_sweets      = total_accepted_sweets
   )
 }
-

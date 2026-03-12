@@ -289,11 +289,6 @@ get_mixture_params <- function(
         
         means[k] <- mean(y_k)
         
-        # ---------------------------------------------
-        # OLD VERSION (kept for reference)
-        # vars[k] <- if (n_k > 1) var(y_k) else 1e-6
-        # ---------------------------------------------
-        
         if (n_k > 1) {
           S_k <- sum((y_k - means[k])^2)
         } else {
@@ -308,11 +303,6 @@ get_mixture_params <- function(
       } else {
         
         means[[k]] <- colMeans(y_k)
-        
-        # ---------------------------------------------
-        # OLD VERSION (kept for reference)
-        # vars[[k]] <- if (n_k > 1) cov(y_k) else diag(D) * 1e-6
-        # ---------------------------------------------
         
         if (n_k > 1) {
           S_k <- cov(y_k) * (n_k - 1)

@@ -15,14 +15,24 @@ desktop.ini
 
 desktop.ini
 
-#scripts/
-
-test/
-
-results/
-
 # Ignore everything in notebooks/
 notebooks/*
 
 # But keep .qmd files
 !notebooks/*.qmd
+
+
+# Targets pipeline cache (never commit)
+_targets/
+_targets-meta/
+
+# All generated simulation outputs and large MCMC files
+results/
+data/simulated/*/mcmc_posterior.rds   # large AntMAN draws – gitignored
+data/simulated/*/data.rds             # optional: keep only if you want raw data versioned (small for N≤500)
+
+# Temporary / log files
+*.log
+*.txt
+*.rds~*
+*.qs

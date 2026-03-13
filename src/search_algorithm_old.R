@@ -135,126 +135,105 @@ sweetening <- function(c_current, data, prior_list, D_current,
 }
 
 
-#' Zealous update phase — greedy local search inspired by SALSO zealous updates
-#'
-#' For each of up to n_zealous randomly selected clusters:
-#'   - Record current partition and loss
-#'   - Temporarily destroy the cluster (deallocate its points)
-#'   - Greedily re-allocate each point (in random order) to the best
-#'     existing cluster or a new one, minimizing the discrepancy measure
-#'   - Accept the change only if the final loss after re-allocation
-#'     is strictly smaller than before destroying the cluster
-zealous_update <- function(c_current,
-                           D_current,
-                           data,
-                           prior_list,
-                           n_zealous   = 10,
-                           method      = "KS",
-                           clusterwise = FALSE,
-                           estimator   = c("posterior", "mle"),
-                           M           = 2000,
-                           alpha_0     = 2,
-                           nu_0        = 2,
-                           theta       = NULL) {
+# Merge and Split Phase
+merge_split_phase <- function(c_current,
+                              D_current,
+                              data,
+                              prior_list,
+                              n_ms     = 1,
+                              n_merge  = 1,
+                              n_split  = 1,
+                              method   = "KS",
+                              clusterwise = FALSE,
+                              estimator   = c("posterior", "mle"),
+                              M        = 2000,
+                              alpha_0  = 2,
+                              nu_0     = 2,
+                              theta    = NULL) {
   
   estimator <- match.arg(estimator)
-  n <- if (is.null(dim(data))) length(data) else nrow(data)
-  K <- max(c_current)
-  if (K <= 1L) {
-    return(list(c_current = c_current,
-                D_current = D_current,
-                n_zealous_accept = 0L))
-  }
+  n_cluster <- max(c_current)
+  n_merge_accept <- 0
+  n_split_accept <- 0
   
-  cl_ind <- sample(seq_len(K))
-  c2 <- c_current
-  D2 <- D_current
-  n_accept <- 0L
-  
-  for (m in seq_len(min(n_zealous, K))) {
+  for (iter in seq_len(n_ms)) {
     
-    c2_old <- c2
-    
-    param_old <- get_mixture_params(c2_old, data, estimator, prior_list,
-                                    alpha_0 = alpha_0, nu_0 = nu_0)
-    D_old <- compute_distance(
-      data       = data,
-      weight     = param_old$weight,
-      mean       = param_old$mean,
-      var        = param_old$var,
-      method     = method,
-      clusterwise = clusterwise,
-      c_alloc    = if (clusterwise) c2_old else NULL,
-      M          = M,
-      theta      = theta
-    )
-    
-    cluster_to_destroy <- cl_ind[m]
-    idx_out <- which(c2 == cluster_to_destroy)
-    if (length(idx_out) == 0L) next
-    ind_out <- sample(idx_out)
-    
-    for (i in ind_out) {
-      K_cur <- max(c2)
-      losses <- numeric(K_cur + 1L)
+    ## --- Merge ---
+    if (n_cluster > 1) {
+      pairs <- t(combn(1:n_cluster, 2))
+      merge_pairs <- pairs[sample(nrow(pairs), min(n_merge, nrow(pairs))), , drop = FALSE]
       
-      for (k in seq_len(K_cur + 1L)) {
-        c_temp <- c2
-        c_temp[i] <- k
-        c_temp_relab <- fulfill_gap_label(c_temp)
+      for (j in seq_len(nrow(merge_pairs))) {
+        c_merge <- c_current
+        c_merge[c_merge == merge_pairs[j, 1]] <- merge_pairs[j, 2]
+        c_merge <- fulfill_gap_label(c_merge)
         
-        param <- get_mixture_params(
-          clustering = c_temp_relab,
-          data       = data,
-          estimator  = estimator,
-          prior_list = prior_list,
-          alpha_0    = alpha_0,
-          nu_0       = nu_0
-        )
+        param <- get_mixture_params(c_merge, data, estimator, prior_list,
+                                    alpha_0 = alpha_0, nu_0 = nu_0)
         
-        losses[k] <- compute_distance(
+        D_new <- compute_distance(
           data       = data,
           weight     = param$weight,
           mean       = param$mean,
           var        = param$var,
           method     = method,
           clusterwise = clusterwise,
-          c_alloc    = if (clusterwise) c_temp_relab else NULL,
+          c_alloc    = if (clusterwise) c_merge else NULL,
           M          = M,
           theta      = theta
         )
+        
+        if (D_new < D_current) {
+          c_current <- c_merge
+          n_cluster <- max(c_current)
+          D_current <- D_new
+          n_merge_accept <- n_merge_accept + 1
+        }
       }
-      
-      best_k <- which.min(losses)
-      c2[i] <- best_k
-      c2 <- fulfill_gap_label(c2)
     }
     
-    param_new <- get_mixture_params(c2, data, estimator, prior_list,
-                                    alpha_0 = alpha_0, nu_0 = nu_0)
-    D_new <- compute_distance(
-      data       = data,
-      weight     = param_new$weight,
-      mean       = param_new$mean,
-      var        = param_new$var,
-      method     = method,
-      clusterwise = clusterwise,
-      c_alloc    = if (clusterwise) c2 else NULL,
-      M          = M,
-      theta      = theta
-    )
-    
-    if (D_new < D_old) {
-      D2 <- D_new
-      n_accept <- n_accept + 1L
-    } else {
-      c2 <- c2_old
+    ## --- Split ---
+    for (j in seq_len(min(n_split, n_cluster))) {
+      cl_to_split <- sample(seq_len(n_cluster), 1)
+      idx_split <- which(c_current == cl_to_split)
+      c_split <- c_current
+      
+      for (i in idx_split)
+        if (runif(1) < 0.5) c_split[i] <- n_cluster + 1
+      
+      c_split <- fulfill_gap_label(c_split)
+      
+      param <- get_mixture_params(c_split, data, estimator, prior_list,
+                                  alpha_0 = alpha_0, nu_0 = nu_0)
+      
+      D_new <- compute_distance(
+        data       = data,
+        weight     = param$weight,
+        mean       = param$mean,
+        var        = param$var,
+        method     = method,
+        clusterwise = clusterwise,
+        c_alloc    = if (clusterwise) c_split else NULL,
+        M          = M,
+        theta      = theta
+      )
+      
+      if (D_new < D_current) {
+        c_current <- c_split
+        n_cluster <- max(c_current)
+        D_current <- D_new
+        n_split_accept <- n_split_accept + 1
+      }
     }
   }
   
-  list(c_current       = c2,
-       D_current       = D2,
-       n_zealous_accept = n_accept)
+  list(
+    c_current      = c_current,
+    D_current      = D_current,
+    n_cluster      = n_cluster,
+    n_merge_accept = n_merge_accept,
+    n_split_accept = n_split_accept
+  )
 }
 
 
@@ -269,10 +248,9 @@ run_clustering <- function(data,
                            n_runs      = 10,
                            n_sweet     = 100,
                            tol         = 1e-10,
-                           # n_ms        = 1,           # commented out — merge-split phase disabled
-                           # n_merge     = 1,
-                           # n_split     = 1,
-                           n_zealous   = 10,           # new parameter controlling zealous phase
+                           n_ms        = 1,
+                           n_merge     = 1,
+                           n_split     = 1,
                            M           = 2000,
                            alpha_0     = 2,
                            nu_0        = 2,
@@ -292,10 +270,11 @@ run_clustering <- function(data,
   if (method == "Wasserstein" && d > 1L) {
     if (is.null(theta)) {
       theta <- generate_theta_normal(L = L, d = d)
+      # Optional safety check
       stopifnot(nrow(theta) == L)
       stopifnot(all(abs(rowSums(theta^2) - 1) < 1e-8))
     } else {
-      L <- nrow(theta)
+      L <- nrow(theta)  # override with supplied matrix size
     }
   } else {
     theta <- NULL
@@ -303,10 +282,9 @@ run_clustering <- function(data,
   
   c_record               <- matrix(NA, n_runs, ncol(clustering_matrix))
   distance_record        <- numeric(n_runs)
-  total_accepted_merges  <- integer(n_runs)   # kept for compatibility, will remain 0
-  total_accepted_splits  <- integer(n_runs)   # kept for compatibility, will remain 0
+  total_accepted_merges  <- integer(n_runs)
+  total_accepted_splits  <- integer(n_runs)
   total_accepted_sweets  <- integer(n_runs)
-  total_accepted_zealous <- integer(n_runs)   # new
   
   init <- initialize_clustering(
     data, clustering_matrix,
@@ -328,30 +306,23 @@ run_clustering <- function(data,
       theta = theta
     )
     
-    # ms <- merge_split_phase( ... )   # ← commented out
-    # Instead perform zealous local search
-    zu <- zealous_update(
+    ms <- merge_split_phase(
       sweet$c_current, sweet$D_current,
       data, prior_list,
-      n_zealous   = n_zealous,
-      method      = method,
-      clusterwise = clusterwise,
-      estimator   = estimator,
-      M           = M,
-      alpha_0     = alpha_0,
-      nu_0        = nu_0,
-      theta       = theta
+      n_ms, n_merge, n_split,
+      method, clusterwise, estimator,
+      M = M, alpha_0 = alpha_0, nu_0 = nu_0,
+      theta = theta
     )
     
-    c_current <- zu$c_current
-    D_current <- zu$D_current
+    c_current <- ms$c_current
+    D_current <- ms$D_current
     
     c_record[run, ]             <- c_current
     distance_record[run]        <- D_current
-    total_accepted_merges[run]  <- 0L                     # no merge-split
-    total_accepted_splits[run]  <- 0L                     # no merge-split
+    total_accepted_merges[run]  <- ms$n_merge_accept
+    total_accepted_splits[run]  <- ms$n_split_accept
     total_accepted_sweets[run]  <- sweet$n_sweet
-    total_accepted_zealous[run] <- zu$n_zealous_accept
   }
   
   final_clustering <- c_record[which.min(distance_record), ]
@@ -362,7 +333,6 @@ run_clustering <- function(data,
     distance_record            = distance_record,
     total_accepted_merges      = total_accepted_merges,
     total_accepted_splits      = total_accepted_splits,
-    total_accepted_sweets      = total_accepted_sweets,
-    total_accepted_zealous     = total_accepted_zealous   # new field
+    total_accepted_sweets      = total_accepted_sweets
   )
 }
